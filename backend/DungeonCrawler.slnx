@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="DungeonCrawler.API/DungeonCrawler.API.csproj" />
+  <Project Path="DungeonCrawler.Tests/DungeonCrawler.Tests.csproj" />
+</Solution>

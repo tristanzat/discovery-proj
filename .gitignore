@@ -1,0 +1,23 @@
+# VS Code personal settings
+*.code-workspace
+.vscode/settings.json
+
+# Personal data
+coursework.csv
+
+# Build artifacts
+backend/bin/
+backend/obj/
+backend/.vs/
+
+# Node modules
+frontend/node_modules/
+frontend/dist/
+
+# Environment variables
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
