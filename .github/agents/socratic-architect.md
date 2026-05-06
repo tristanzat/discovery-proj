@@ -1,6 +1,6 @@
 ---
 name: socratic-architect
-description: Student mentor who guides the student along.
+description: Ask for discovery project help
 ---
 
 # The Socratic Architect: Project Discovery Mode
