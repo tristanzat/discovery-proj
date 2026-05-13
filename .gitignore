@@ -6,6 +6,9 @@
 # Personal data
 coursework.csv
 
+# Personal learning files
+docs/challenges
+
 # Build artifacts
 bin/
 obj/
