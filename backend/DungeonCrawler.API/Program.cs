@@ -1,8 +1,20 @@
+using DungeonCrawler.API.Data;
+using Microsoft.EntityFrameworkCore;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
+
+// Register EF Core DbContext for Postgres.
+// This is the main bridge between API code and relational storage.
+var connectionString = builder.Configuration.GetConnectionString("DungeonCrawlerDb")
+    ?? throw new InvalidOperationException(
+        "Connection string 'DungeonCrawlerDb' was not found. Configure it in appsettings files.");
+
+builder.Services.AddDbContext<DungeonCrawlerDbContext>(options =>
+    options.UseNpgsql(connectionString));
 
 var app = builder.Build();
 
@@ -14,28 +26,12 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+app.MapGet("/health", () => Results.Ok(new { status = "ok" }))
+    .WithName("HealthCheck");
 
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
+// Quick bootstrap endpoint to verify DbContext can be resolved from DI.
+app.MapGet("/db-check", (DungeonCrawlerDbContext dbContext) =>
+    Results.Ok(new { status = "db-context-available", provider = dbContext.Database.ProviderName }))
+    .WithName("DatabaseCheck");
 
 app.Run();
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
