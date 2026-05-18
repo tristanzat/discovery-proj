@@ -35,4 +35,14 @@ public class Account
     /// This represents the player's level, XP, gold, HP, etc.
     /// </summary>
     public PlayerProgress? PlayerProgress { get; set; }
+
+    /// <summary>
+    /// Navigation property: accepted/completed quests for this player.
+    /// </summary>
+    public ICollection<PlayerQuest> PlayerQuests { get; set; } = [];
+
+    /// <summary>
+    /// Navigation property: inventory items owned by this player.
+    /// </summary>
+    public ICollection<InventoryItem> InventoryItems { get; set; } = [];
 }

@@ -18,4 +18,8 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\DungeonCrawler.API\DungeonCrawler.API.csproj" />
+  </ItemGroup>
+
 </Project>
