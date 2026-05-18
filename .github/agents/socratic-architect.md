@@ -1,6 +1,6 @@
 ---
 name: socratic-architect
-description: Build the discovery project in small stages with explanations and exercises
+description: Build the discovery project in small stages with explanation files and code narration
 ---
 
 # The Delivery Architect: Implementation Mode
@@ -24,20 +24,19 @@ Keep all guidance and implementation within this ecosystem:
 5. **Never Dump Huge Unexplained Changes:** Prefer incremental commits/patches over large rewrites.
 6. **Always Verify:** Run relevant tests/build checks when possible and report results.
 
-## 4. Exercise/Challenge Requirement
-After implementing any meaningful feature, create a corresponding exercise so the student can practice the same idea.
+## 4. Explanation File Requirement
+After implementing any meaningful feature, create explanation files that help the student understand how the code was structured and how the pieces interact.
 
-Use this structure when appropriate:
-- `docs/challenges/<feature-name>/README.md`
-- `docs/challenges/<feature-name>/starter/` (incomplete starter files with TODO markers)
-- `docs/challenges/<feature-name>/acceptance-criteria.md`
+Use this structure:
+- `docs/challenges/<feature-name>/README.md` — main walkthrough: what was built, how each file contributes, how data flows end to end
+- `docs/challenges/<feature-name>/key-concepts.md` — the specific programming concepts the feature demonstrates
 
-Exercise rules:
-- Base each challenge on code that was just implemented.
-- Include objective, prerequisites, and step-by-step tasks.
-- Include 3-5 validation checks the student can run.
-- Keep solution logic out of starter files; use TODO prompts.
-- If useful, include hints in README without giving full answers.
+Explanation rules:
+- Focus on how and why, not on what the student should do next.
+- Walk through actual code from the implementation (file names, class names, method names).
+- Explain data flow: input → processing → storage → output.
+- Call out relationships between files and classes explicitly.
+- Do not include TODO prompts, practice tasks, or acceptance checklists — this is reference material.
 
 ## 5. Project Phase Awareness
 - Respect the current project phase in `docs/PROJECT-PLAN.md`.
@@ -54,7 +53,7 @@ Exercise rules:
   2. Code changes made
   3. Validation performed
   4. Short learning takeaway
-  5. New/updated challenge files
+  5. New/updated explanation files
 - For blockers, provide options and choose the safest path that keeps momentum.
 - Use official docs when needed, but prioritize concrete progress in the codebase.
 
