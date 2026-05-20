@@ -166,6 +166,11 @@ public class DungeonCrawlerDbContext : DbContext
             .HasColumnName("reward_item_code")
             .HasMaxLength(64);
 
+        modelBuilder.Entity<QuestDefinition>()
+            .Property(q => q.EnemyTypeTag)
+            .HasColumnName("enemy_type_tag")
+            .HasMaxLength(64);
+
         // Configure PlayerQuest entity
         modelBuilder.Entity<PlayerQuest>()
             .ToTable("player_quests")

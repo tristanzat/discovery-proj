@@ -19,6 +19,7 @@ builder.Services.AddDbContext<DungeonCrawlerDbContext>(options =>
     options.UseNpgsql(connectionString));
 builder.Services.AddSingleton<IDungeonSessionStore, InMemoryDungeonSessionStore>();
 builder.Services.AddSingleton<IQuestRewardService, QuestRewardService>();
+builder.Services.AddSingleton<ILevelUpService, LevelUpService>();
 
 var app = builder.Build();
 
@@ -32,7 +33,8 @@ var starterQuestDefinitions = new[]
         RequiredEnemyDefeats = 1,
         RewardXp = 25,
         RewardGold = 15,
-        RewardItemCode = "goblin-ear-trophy"
+        RewardItemCode = "goblin-ear-trophy",
+        EnemyTypeTag = "Goblin"
     }
 };
 
@@ -282,25 +284,10 @@ app.MapPost("/quests/accept", async (
 app.MapPost("/quests/complete", async (
     CompleteQuestRequest request,
     DungeonCrawlerDbContext dbContext,
-    IDungeonSessionStore sessionStore,
     IQuestRewardService questRewardService,
+    ILevelUpService levelUpService,
     CancellationToken cancellationToken) =>
 {
-    if (!sessionStore.TryGet(request.SessionId, out var session) || session is null)
-    {
-        return Results.NotFound(new { error = "Session not found." });
-    }
-
-    if (session.AccountId != request.AccountId)
-    {
-        return Results.BadRequest(new { error = "Session does not belong to this account." });
-    }
-
-    if (!session.IsCompleted || session.Status != "victory")
-    {
-        return Results.BadRequest(new { error = "Session is not a victorious run." });
-    }
-
     var playerQuest = await dbContext.PlayerQuests
         .FirstOrDefaultAsync(
             pq => pq.AccountId == request.AccountId && pq.QuestId == request.QuestId,
@@ -314,6 +301,16 @@ app.MapPost("/quests/complete", async (
     if (playerQuest.Status == "completed")
     {
         return Results.Conflict(new { error = "Quest is already completed." });
+    }
+
+    // Quest must have reached "ready" status through the combat kill-tracking in /combat/attack.
+    if (playerQuest.Status != "ready")
+    {
+        return Results.BadRequest(new
+        {
+            error = "Quest progress is not complete yet. Keep defeating enemies.",
+            progressCount = playerQuest.ProgressCount
+        });
     }
 
     var questDefinition = await dbContext.QuestDefinitions
@@ -333,7 +330,6 @@ app.MapPost("/quests/complete", async (
         return Results.NotFound(new { error = "Player progression record was not found." });
     }
 
-    playerQuest.ProgressCount = Math.Max(playerQuest.ProgressCount, questDefinition.RequiredEnemyDefeats);
     playerQuest.Status = "completed";
     playerQuest.CompletedAt = DateTime.UtcNow;
 
@@ -341,7 +337,10 @@ app.MapPost("/quests/complete", async (
     progress.Gold += questDefinition.RewardGold;
     progress.LastSavedAt = DateTime.UtcNow;
 
-    var loot = questRewardService.CreateLootDrop(session.EnemyName);
+    // Check if the new XP total crosses one or more level thresholds.
+    int levelsGained = levelUpService.ApplyLevelUps(progress);
+
+    var loot = questRewardService.ResolveLoot(questDefinition.RewardItemCode);
     var existingInventoryItem = await dbContext.InventoryItems
         .FirstOrDefaultAsync(
             ii => ii.AccountId == request.AccountId && ii.ItemCode == loot.ItemCode,
@@ -388,7 +387,10 @@ app.MapPost("/quests/complete", async (
         {
             level = progress.Level,
             xp = progress.Xp,
-            gold = progress.Gold
+            gold = progress.Gold,
+            maxHp = progress.MaxHp,
+            levelsGained,
+            leveledUp = levelsGained > 0
         }
     });
 })
@@ -503,9 +505,11 @@ app.MapGet("/dungeon/session/{sessionId}", (
 })
 .WithName("GetDungeonSession");
 
-app.MapPost("/combat/attack", (
+app.MapPost("/combat/attack", async (
     CombatActionRequest request,
-    IDungeonSessionStore sessionStore) =>
+    IDungeonSessionStore sessionStore,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
 {
     if (!sessionStore.TryGet(request.SessionId, out var session) || session is null)
     {
@@ -524,11 +528,50 @@ app.MapPost("/combat/attack", (
     session.EnemyHp = Math.Max(0, session.EnemyHp - playerDamage);
     var outcome = "player-attacked";
 
+    // Populated only on a killing blow so the response can surface quest progress changes.
+    List<object> questProgressUpdates = [];
+
     if (session.EnemyHp == 0)
     {
         session.IsCompleted = true;
         session.Status = "victory";
         outcome = "enemy-defeated";
+
+        // Advance kill count on every accepted quest whose enemy type tag matches the defeated enemy.
+        var acceptedQuests = await dbContext.PlayerQuests
+            .Where(pq => pq.AccountId == session.AccountId && pq.Status == "accepted")
+            .Include(pq => pq.QuestDefinition)
+            .ToListAsync(cancellationToken);
+
+        foreach (var pq in acceptedQuests)
+        {
+            var tag = pq.QuestDefinition?.EnemyTypeTag;
+            // Null tag means any enemy satisfies the quest; otherwise require a name match.
+            var matches = tag is null
+                || session.EnemyName.Contains(tag, StringComparison.OrdinalIgnoreCase);
+
+            if (!matches) continue;
+
+            pq.ProgressCount += 1;
+
+            // Transition to "ready" once the required kill count is reached.
+            if (pq.ProgressCount >= (pq.QuestDefinition?.RequiredEnemyDefeats ?? 1))
+            {
+                pq.Status = "ready";
+            }
+
+            questProgressUpdates.Add(new
+            {
+                questId = pq.QuestId,
+                progressCount = pq.ProgressCount,
+                status = pq.Status
+            });
+        }
+
+        if (acceptedQuests.Count > 0)
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
     }
     else
     {
@@ -555,7 +598,8 @@ app.MapPost("/combat/attack", (
         enemy = new { name = session.EnemyName, hp = session.EnemyHp, maxHp = session.EnemyMaxHp },
         turn = session.TurnNumber,
         status = session.Status,
-        isCompleted = session.IsCompleted
+        isCompleted = session.IsCompleted,
+        questProgress = questProgressUpdates
     });
 })
 .WithName("CombatAttack");
@@ -583,6 +627,43 @@ app.MapPost("/combat/retreat", (
 })
 .WithName("CombatRetreat");
 
+app.MapGet("/player/progress/{accountId:int}", async (
+    int accountId,
+    DungeonCrawlerDbContext dbContext,
+    ILevelUpService levelUpService,
+    CancellationToken cancellationToken) =>
+{
+    var progress = await dbContext.PlayerProgresses
+        .AsNoTracking()
+        .FirstOrDefaultAsync(pp => pp.AccountId == accountId, cancellationToken);
+
+    if (progress is null)
+    {
+        return Results.NotFound(new { error = "Player progress not found." });
+    }
+
+    var isMaxLevel = progress.Level >= 10;
+    var xpForCurrentLevel = levelUpService.XpRequiredForLevel(progress.Level);
+
+    return Results.Ok(new
+    {
+        accountId,
+        level = progress.Level,
+        xp = progress.Xp,
+        gold = progress.Gold,
+        maxHp = progress.MaxHp,
+        levelProgress = new
+        {
+            xpIntoCurrentLevel = progress.Xp - xpForCurrentLevel,
+            xpToNextLevel = isMaxLevel
+                ? 0
+                : levelUpService.XpRequiredForLevel(progress.Level + 1) - progress.Xp,
+            atMaxLevel = isMaxLevel
+        }
+    });
+})
+.WithName("GetPlayerProgress");
+
 app.Run();
 
 internal sealed record RegisterRequest(string Username, string Password);
@@ -590,4 +671,4 @@ internal sealed record LoginRequest(string Username, string Password);
 internal sealed record EnterDungeonRequest(int AccountId);
 internal sealed record CombatActionRequest(string SessionId);
 internal sealed record AcceptQuestRequest(int AccountId, string QuestId);
-internal sealed record CompleteQuestRequest(int AccountId, string QuestId, string SessionId);
+internal sealed record CompleteQuestRequest(int AccountId, string QuestId);

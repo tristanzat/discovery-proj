@@ -70,8 +70,10 @@ obj/Debug/net10.0/
 Program.cs
 Services/
  IDungeonSessionStore.cs
+ ILevelUpService.cs
  InMemoryDungeonSessionStore.cs
  IQuestRewardService.cs
+ LevelUpService.cs
  QuestRewardService.cs
 
 [metadataReferences]

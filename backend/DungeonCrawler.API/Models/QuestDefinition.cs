@@ -19,5 +19,11 @@ public class QuestDefinition
 
     public string? RewardItemCode { get; set; }
 
+    /// <summary>
+    /// Optional substring matched against the defeated enemy's name.
+    /// Null means any enemy type counts toward this quest's progress.
+    /// </summary>
+    public string? EnemyTypeTag { get; set; }
+
     public ICollection<PlayerQuest> PlayerQuests { get; set; } = [];
 }
