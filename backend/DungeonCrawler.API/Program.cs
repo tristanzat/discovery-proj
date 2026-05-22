@@ -20,6 +20,7 @@ builder.Services.AddDbContext<DungeonCrawlerDbContext>(options =>
 builder.Services.AddSingleton<IDungeonSessionStore, InMemoryDungeonSessionStore>();
 builder.Services.AddSingleton<IQuestRewardService, QuestRewardService>();
 builder.Services.AddSingleton<ILevelUpService, LevelUpService>();
+builder.Services.AddSingleton<IInventoryItemEffectService, InventoryItemEffectService>();
 
 var app = builder.Build();
 
@@ -35,6 +36,17 @@ var starterQuestDefinitions = new[]
         RewardGold = 15,
         RewardItemCode = "goblin-ear-trophy",
         EnemyTypeTag = "Goblin"
+    },
+    new QuestDefinition
+    {
+        QuestId = "goblin-culling-contract",
+        Name = "Goblin Culling Contract",
+        Description = "Defeat 3 goblins to thin out the cave population.",
+        RequiredEnemyDefeats = 3,
+        RewardXp = 60,
+        RewardGold = 35,
+        RewardItemCode = "unknown-relic-shard",
+        EnemyTypeTag = "Goblin"
     }
 };
 
@@ -42,6 +54,49 @@ var starterQuestDefinitions = new[]
 using (var scope = app.Services.CreateScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<DungeonCrawlerDbContext>();
+    await dbContext.Database.EnsureCreatedAsync();
+
+    // Ensure Phase 2 tables/columns exist even when the database was initialized
+    // from older scripts that only created Phase 1 tables.
+    await dbContext.Database.ExecuteSqlRawAsync(
+        """
+        CREATE TABLE IF NOT EXISTS quest_definitions (
+            quest_id VARCHAR(64) PRIMARY KEY,
+            name VARCHAR(80) NOT NULL,
+            description VARCHAR(300) NOT NULL,
+            required_enemy_defeats INT NOT NULL DEFAULT 1,
+            reward_xp INT NOT NULL DEFAULT 0,
+            reward_gold INT NOT NULL DEFAULT 0,
+            reward_item_code VARCHAR(64),
+            enemy_type_tag VARCHAR(64)
+        );
+
+        CREATE TABLE IF NOT EXISTS player_quests (
+            player_quest_id BIGSERIAL PRIMARY KEY,
+            account_id INT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+            quest_id VARCHAR(64) NOT NULL REFERENCES quest_definitions(quest_id) ON DELETE RESTRICT,
+            status VARCHAR(24) NOT NULL,
+            progress_count INT NOT NULL DEFAULT 0,
+            accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at TIMESTAMPTZ NULL,
+            CONSTRAINT uq_player_quest UNIQUE (account_id, quest_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS inventory_items (
+            inventory_item_id BIGSERIAL PRIMARY KEY,
+            account_id INT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+            item_code VARCHAR(64) NOT NULL,
+            item_name VARCHAR(100) NOT NULL,
+            rarity VARCHAR(24) NOT NULL,
+            quantity INT NOT NULL DEFAULT 1,
+            acquired_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT uq_inventory_item UNIQUE (account_id, item_code)
+        );
+
+        ALTER TABLE quest_definitions
+            ADD COLUMN IF NOT EXISTS enemy_type_tag VARCHAR(64) NULL;
+        """);
+
     var existingQuestIds = await dbContext.QuestDefinitions
         .AsNoTracking()
         .Select(q => q.QuestId)
@@ -124,6 +179,17 @@ app.MapPost("/auth/register", async (
         Gold = 0,
         MaxHp = 100,
         LastSavedAt = DateTime.UtcNow
+    });
+
+    // Starter consumables make inventory usage testable immediately in Phase 2.
+    dbContext.InventoryItems.Add(new InventoryItem
+    {
+        AccountId = account.AccountId,
+        ItemCode = "minor-healing-potion",
+        ItemName = "Minor Healing Potion",
+        Rarity = "common",
+        Quantity = 3,
+        AcquiredAt = DateTime.UtcNow
     });
 
     await dbContext.SaveChangesAsync(cancellationToken);
@@ -396,6 +462,80 @@ app.MapPost("/quests/complete", async (
 })
 .WithName("CompleteQuest");
 
+app.MapGet("/quests/log/{accountId:int}", async (
+    int accountId,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var accountExists = await dbContext.Accounts
+        .AsNoTracking()
+        .AnyAsync(a => a.AccountId == accountId, cancellationToken);
+
+    if (!accountExists)
+    {
+        return Results.NotFound(new { error = "Account not found." });
+    }
+
+    var questLog = await dbContext.PlayerQuests
+        .AsNoTracking()
+        .Where(pq => pq.AccountId == accountId)
+        .Include(pq => pq.QuestDefinition)
+        .OrderByDescending(pq => pq.Status == "ready")
+        .ThenByDescending(pq => pq.AcceptedAt)
+        .Select(pq => new
+        {
+            questId = pq.QuestId,
+            name = pq.QuestDefinition != null ? pq.QuestDefinition.Name : pq.QuestId,
+            description = pq.QuestDefinition != null ? pq.QuestDefinition.Description : string.Empty,
+            requiredEnemyDefeats = pq.QuestDefinition != null ? pq.QuestDefinition.RequiredEnemyDefeats : 0,
+            progressCount = pq.ProgressCount,
+            status = pq.Status,
+            acceptedAt = pq.AcceptedAt,
+            completedAt = pq.CompletedAt
+        })
+        .ToListAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        accountId,
+        questCount = questLog.Count,
+        quests = questLog
+    });
+})
+.WithName("GetQuestLog");
+
+app.MapPost("/quests/abandon", async (
+    AbandonQuestRequest request,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var playerQuest = await dbContext.PlayerQuests
+        .FirstOrDefaultAsync(
+            pq => pq.AccountId == request.AccountId && pq.QuestId == request.QuestId,
+            cancellationToken);
+
+    if (playerQuest is null)
+    {
+        return Results.NotFound(new { error = "Accepted quest not found for this account." });
+    }
+
+    if (playerQuest.Status == "completed")
+    {
+        return Results.Conflict(new { error = "Completed quests cannot be abandoned." });
+    }
+
+    dbContext.PlayerQuests.Remove(playerQuest);
+    await dbContext.SaveChangesAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        message = "quest-abandoned",
+        accountId = request.AccountId,
+        questId = request.QuestId
+    });
+})
+.WithName("AbandonQuest");
+
 app.MapGet("/inventory/{accountId:int}", async (
     int accountId,
     DungeonCrawlerDbContext dbContext,
@@ -432,6 +572,83 @@ app.MapGet("/inventory/{accountId:int}", async (
     });
 })
 .WithName("GetInventory");
+
+app.MapPost("/inventory/use-combat", async (
+    UseInventoryItemRequest request,
+    DungeonCrawlerDbContext dbContext,
+    IDungeonSessionStore sessionStore,
+    IInventoryItemEffectService itemEffectService,
+    CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.ItemCode))
+    {
+        return Results.BadRequest(new { error = "Item code is required." });
+    }
+
+    var itemCode = request.ItemCode.Trim();
+
+    if (!sessionStore.TryGet(request.SessionId, out var session) || session is null)
+    {
+        return Results.NotFound(new { error = "Session not found." });
+    }
+
+    if (session.AccountId != request.AccountId)
+    {
+        return Results.BadRequest(new { error = "Session does not belong to this account." });
+    }
+
+    if (session.IsCompleted)
+    {
+        return Results.BadRequest(new { error = "Combat is already completed for this session." });
+    }
+
+    var inventoryItem = await dbContext.InventoryItems
+        .FirstOrDefaultAsync(
+            ii => ii.AccountId == request.AccountId && ii.ItemCode == itemCode,
+            cancellationToken);
+
+    if (inventoryItem is null || inventoryItem.Quantity <= 0)
+    {
+        return Results.NotFound(new { error = "Item not found in inventory." });
+    }
+
+    var effect = itemEffectService.ApplyInCombat(itemCode, session);
+    if (!effect.IsSuccess)
+    {
+        return Results.BadRequest(new
+        {
+            error = effect.Message,
+            outcome = effect.Outcome
+        });
+    }
+
+    inventoryItem.Quantity -= 1;
+    if (inventoryItem.Quantity <= 0)
+    {
+        dbContext.InventoryItems.Remove(inventoryItem);
+    }
+
+    sessionStore.CreateOrReplace(session);
+    await dbContext.SaveChangesAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        message = "item-used",
+        outcome = effect.Outcome,
+        itemCode,
+        amount = effect.Amount,
+        remainingQuantity = Math.Max(0, inventoryItem.Quantity),
+        session = new
+        {
+            sessionId = session.SessionId,
+            playerHp = session.PlayerHp,
+            playerMaxHp = session.PlayerMaxHp,
+            enemyHp = session.EnemyHp,
+            status = session.Status
+        }
+    });
+})
+.WithName("UseInventoryItemInCombat");
 
 app.MapPost("/dungeon/enter", async (
     EnterDungeonRequest request,
@@ -672,3 +889,5 @@ internal sealed record EnterDungeonRequest(int AccountId);
 internal sealed record CombatActionRequest(string SessionId);
 internal sealed record AcceptQuestRequest(int AccountId, string QuestId);
 internal sealed record CompleteQuestRequest(int AccountId, string QuestId);
+internal sealed record AbandonQuestRequest(int AccountId, string QuestId);
+internal sealed record UseInventoryItemRequest(int AccountId, string SessionId, string ItemCode);
