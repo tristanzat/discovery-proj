@@ -109,7 +109,7 @@
 
 .workspace-grid {
   display: grid;
-  grid-template-columns: 360px minmax(0, 1fr) 320px;
+  grid-template-columns: 340px minmax(0, 1fr) 420px;
   gap: 24px;
   align-items: start;
 }
@@ -184,6 +184,24 @@ button.danger {
   padding: 18px;
   display: grid;
   gap: 18px;
+}
+
+.panel-inset {
+  border: 1px solid var(--border-soft);
+  background: var(--surface-bg);
+  border-radius: 18px;
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.panel-inset h3 {
+  margin: 0;
+}
+
+.item-list {
+  display: grid;
+  gap: 10px;
 }
 
 .account-metrics > div {
@@ -276,6 +294,61 @@ button.danger {
 
 .activity-feed li {
   color: var(--text-strong);
+}
+
+.compact-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+}
+
+.quest-list {
+  display: grid;
+  gap: 12px;
+}
+
+.quest-card {
+  border: 1px solid var(--border-soft);
+  background: var(--surface-bg);
+  border-radius: 18px;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.quest-progress {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.quest-status-not-started {
+  background: rgba(72, 106, 147, 0.12);
+  color: var(--info);
+  border-color: rgba(72, 106, 147, 0.25);
+}
+
+.quest-status-accepted {
+  background: rgba(191, 112, 37, 0.12);
+  color: #8a4d18;
+  border-color: rgba(191, 112, 37, 0.25);
+}
+
+.quest-status-ready {
+  background: rgba(94, 161, 105, 0.15);
+  color: var(--success);
+  border-color: rgba(94, 161, 105, 0.3);
+}
+
+.quest-status-completed {
+  background: rgba(52, 80, 116, 0.16);
+  color: #2f4c70;
+  border-color: rgba(52, 80, 116, 0.32);
+}
+
+.level-hint {
+  font-size: 0.92rem;
+  color: var(--muted);
 }
 
 .error-banner {
