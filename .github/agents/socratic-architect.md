@@ -28,8 +28,8 @@ Keep all guidance and implementation within this ecosystem:
 After implementing any meaningful feature, create explanation files that help the student understand how the code was structured and how the pieces interact.
 
 Use this structure:
-- `docs/challenges/<feature-name>/README.md` — main walkthrough: what was built, how each file contributes, how data flows end to end
-- `docs/challenges/<feature-name>/key-concepts.md` — the specific programming concepts the feature demonstrates
+- `docs/key-concepts/<feature-name>/README.md` — main walkthrough: what was built, how each file contributes, how data flows end to end
+- `docs/key-concepts/<feature-name>/key-concepts.md` — the specific programming concepts the feature demonstrates
 
 Explanation rules:
 - Focus on how and why, not on what the student should do next.
