@@ -97,6 +97,21 @@ type InventoryResponse = {
   items: InventoryItem[]
 }
 
+type HubChatMessage = {
+  messageId: number
+  accountId: number
+  username: string
+  message: string
+  sentAt: string
+}
+
+type HubOverviewResponse = {
+  accountId: number
+  username: string
+  activeAdventurerCount: number
+  messages: HubChatMessage[]
+}
+
 type CombatQuestProgressUpdate = {
   questId: string
   progressCount: number
@@ -198,8 +213,11 @@ function App() {
   const [availableQuests, setAvailableQuests] = useState<QuestBoardItem[]>([])
   const [questLog, setQuestLog] = useState<QuestLogItem[]>([])
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([])
+  const [hubChatMessages, setHubChatMessages] = useState<HubChatMessage[]>([])
+  const [activeAdventurerCount, setActiveAdventurerCount] = useState(0)
+  const [hubMessageDraft, setHubMessageDraft] = useState('')
   const [activity, setActivity] = useState<string[]>([
-    'Welcome. Register or log in, then run the Phase 2 quest and loot loop.',
+    'Welcome to Phase 3. Log in, enter the hub, and chat before diving into combat.',
   ])
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -269,12 +287,20 @@ function App() {
     return response.items
   }
 
+  async function loadHubOverview(accountId: number) {
+    const response = await requestJson<HubOverviewResponse>(`/api/hub/overview/${accountId}`)
+    setActiveAdventurerCount(response.activeAdventurerCount)
+    setHubChatMessages(response.messages)
+    return response
+  }
+
   async function refreshPhaseTwoState(accountId: number) {
     await Promise.all([
       loadProgress(accountId),
       loadAvailableQuests(accountId),
       loadQuestLog(accountId),
       loadInventory(accountId),
+      loadHubOverview(accountId),
     ])
   }
 
@@ -306,6 +332,7 @@ function App() {
       setSession(null)
       await refreshPhaseTwoState(createdAccount.accountId)
       pushActivity(`Registered adventurer ${createdAccount.username}.`)
+      pushActivity('Entered hub overworld chat. Say hello to nearby adventurers.')
       setRegisterForm((current) => ({ ...current, password: '' }))
       setLoginForm({ username: createdAccount.username, password: '' })
     })
@@ -332,7 +359,41 @@ function App() {
       pushActivity(
         `${loggedInAccount.username} logged in at level ${loggedInAccount.level ?? 1}.`,
       )
+      pushActivity('Hub state loaded: chat and active adventurer count refreshed.')
       setLoginForm((current) => ({ ...current, password: '' }))
+    })
+  }
+
+  async function handleRefreshHub() {
+    if (!account) {
+      return
+    }
+
+    await withSubmission(async () => {
+      await loadHubOverview(account.accountId)
+      pushActivity('Refreshed hub overview and chat feed.')
+    })
+  }
+
+  async function handleSendHubMessage() {
+    if (!account) {
+      return
+    }
+
+    const message = hubMessageDraft.trim()
+    if (!message) {
+      return
+    }
+
+    await withSubmission(async () => {
+      await requestJson<{ message: string }>('/api/hub/chat/send', {
+        method: 'POST',
+        body: JSON.stringify({ accountId: account.accountId, message }),
+      })
+
+      setHubMessageDraft('')
+      await loadHubOverview(account.accountId)
+      pushActivity(`Hub chat: ${account.username} says "${message}"`)
     })
   }
 
@@ -519,7 +580,7 @@ function App() {
     <main className="app-shell">
       <section className="hero-panel panel">
         <div className="eyebrow-row">
-          <span className="eyebrow">Phase 2 frontend</span>
+          <span className="eyebrow">Phase 3 foundation</span>
           <span className={`status-pill status-${apiStatus}`}>Backend {apiStatus}</span>
         </div>
 
@@ -527,8 +588,8 @@ function App() {
           <div>
             <h1>Dungeon crawler control room</h1>
             <p>
-              This UI drives the full quest, inventory, and loot lifecycle: accept quests, clear
-              goblins, complete objectives, and consume items during combat.
+              Phase 3 starts here: gather in the hub overworld, chat with other adventurers, then
+              run quests, combat, and inventory actions.
             </p>
           </div>
 
@@ -544,6 +605,10 @@ function App() {
             <div>
               <span className="stat-label">XP / Gold</span>
               <strong>{`${progress?.xp ?? 0} / ${progress?.gold ?? 0}`}</strong>
+            </div>
+            <div>
+              <span className="stat-label">Hub adventurers</span>
+              <strong>{activeAdventurerCount}</strong>
             </div>
           </div>
         </div>
@@ -756,8 +821,56 @@ function App() {
 
         <div className="panel stack-panel quest-panel">
           <div>
-            <h2>Quest board and inventory</h2>
-            <p>Accept quests, finish ready quests, and abandon active quests when needed.</p>
+            <h2>Hub chat, quests, and inventory</h2>
+            <p>Talk in the hub, manage quest lifecycle, and keep your item stacks organized.</p>
+          </div>
+
+          <div className="panel-inset">
+            <div className="eyebrow-row">
+              <h3>Hub chat</h3>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void handleRefreshHub()}
+                disabled={!hasAccount || isSubmitting || apiStatus !== 'online'}
+              >
+                Refresh hub
+              </button>
+            </div>
+
+            <div className="chat-compose-row">
+              <input
+                value={hubMessageDraft}
+                onChange={(event) => setHubMessageDraft(event.target.value)}
+                placeholder="Message the hub overworld..."
+                maxLength={280}
+                disabled={!hasAccount || isSubmitting || apiStatus !== 'online'}
+              />
+              <button
+                type="button"
+                onClick={() => void handleSendHubMessage()}
+                disabled={
+                  !hasAccount ||
+                  isSubmitting ||
+                  apiStatus !== 'online' ||
+                  hubMessageDraft.trim().length === 0
+                }
+              >
+                Send
+              </button>
+            </div>
+
+            {hubChatMessages.length === 0 ? (
+              <p>No hub messages yet. Be the first to post.</p>
+            ) : (
+              <ul className="chat-feed">
+                {hubChatMessages.map((message) => (
+                  <li key={message.messageId}>
+                    <strong>{message.username}</strong>: {message.message}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
           <div className="quest-list">

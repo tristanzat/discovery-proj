@@ -93,6 +93,16 @@ using (var scope = app.Services.CreateScope())
             CONSTRAINT uq_inventory_item UNIQUE (account_id, item_code)
         );
 
+        CREATE TABLE IF NOT EXISTS hub_chat_messages (
+            hub_chat_message_id BIGSERIAL PRIMARY KEY,
+            account_id INT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+            message VARCHAR(280) NOT NULL,
+            sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS ix_hub_chat_messages_sent_at
+            ON hub_chat_messages(sent_at DESC);
+
         ALTER TABLE quest_definitions
             ADD COLUMN IF NOT EXISTS enemy_type_tag VARCHAR(64) NULL;
         """);
@@ -881,6 +891,141 @@ app.MapGet("/player/progress/{accountId:int}", async (
 })
 .WithName("GetPlayerProgress");
 
+app.MapGet("/hub/overview/{accountId:int}", async (
+    int accountId,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var account = await dbContext.Accounts
+        .AsNoTracking()
+        .FirstOrDefaultAsync(a => a.AccountId == accountId, cancellationToken);
+
+    if (account is null)
+    {
+        return Results.NotFound(new { error = "Account not found." });
+    }
+
+    var activeAdventurerCount = await dbContext.Accounts
+        .AsNoTracking()
+        .CountAsync(cancellationToken);
+
+    var latestMessages = await dbContext.HubChatMessages
+        .AsNoTracking()
+        .Include(cm => cm.Account)
+        .OrderByDescending(cm => cm.SentAt)
+        .Take(30)
+        .Select(cm => new
+        {
+            messageId = cm.HubChatMessageId,
+            accountId = cm.AccountId,
+            username = cm.Account != null ? cm.Account.Username : "unknown",
+            message = cm.Message,
+            sentAt = cm.SentAt
+        })
+        .ToListAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        accountId,
+        username = account.Username,
+        activeAdventurerCount,
+        messages = latestMessages
+            .OrderBy(cm => cm.sentAt)
+            .ToList()
+    });
+})
+.WithName("GetHubOverview");
+
+app.MapGet("/hub/chat/{accountId:int}", async (
+    int accountId,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var accountExists = await dbContext.Accounts
+        .AsNoTracking()
+        .AnyAsync(a => a.AccountId == accountId, cancellationToken);
+
+    if (!accountExists)
+    {
+        return Results.NotFound(new { error = "Account not found." });
+    }
+
+    var latestMessages = await dbContext.HubChatMessages
+        .AsNoTracking()
+        .Include(cm => cm.Account)
+        .OrderByDescending(cm => cm.SentAt)
+        .Take(30)
+        .Select(cm => new
+        {
+            messageId = cm.HubChatMessageId,
+            accountId = cm.AccountId,
+            username = cm.Account != null ? cm.Account.Username : "unknown",
+            message = cm.Message,
+            sentAt = cm.SentAt
+        })
+        .ToListAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        accountId,
+        messageCount = latestMessages.Count,
+        messages = latestMessages
+            .OrderBy(cm => cm.sentAt)
+            .ToList()
+    });
+})
+.WithName("GetHubChat");
+
+app.MapPost("/hub/chat/send", async (
+    SendHubChatMessageRequest request,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var account = await dbContext.Accounts
+        .AsNoTracking()
+        .FirstOrDefaultAsync(a => a.AccountId == request.AccountId, cancellationToken);
+
+    if (account is null)
+    {
+        return Results.NotFound(new { error = "Account not found." });
+    }
+
+    if (string.IsNullOrWhiteSpace(request.Message))
+    {
+        return Results.BadRequest(new { error = "Message is required." });
+    }
+
+    var message = request.Message.Trim();
+    if (message.Length > 280)
+    {
+        return Results.BadRequest(new { error = "Message cannot exceed 280 characters." });
+    }
+
+    var chatMessage = new HubChatMessage
+    {
+        AccountId = request.AccountId,
+        Message = message,
+        SentAt = DateTime.UtcNow
+    };
+
+    dbContext.HubChatMessages.Add(chatMessage);
+    await dbContext.SaveChangesAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        message = "hub-chat-sent",
+        chat = new
+        {
+            messageId = chatMessage.HubChatMessageId,
+            accountId = chatMessage.AccountId,
+            username = account.Username,
+            message = chatMessage.Message,
+            sentAt = chatMessage.SentAt
+        }
+    });
+})
+.WithName("SendHubChatMessage");
+
 app.Run();
 
 internal sealed record RegisterRequest(string Username, string Password);
@@ -891,3 +1036,4 @@ internal sealed record AcceptQuestRequest(int AccountId, string QuestId);
 internal sealed record CompleteQuestRequest(int AccountId, string QuestId);
 internal sealed record AbandonQuestRequest(int AccountId, string QuestId);
 internal sealed record UseInventoryItemRequest(int AccountId, string SessionId, string ItemCode);
+internal sealed record SendHubChatMessageRequest(int AccountId, string Message);

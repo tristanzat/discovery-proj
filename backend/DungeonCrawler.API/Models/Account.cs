@@ -45,4 +45,9 @@ public class Account
     /// Navigation property: inventory items owned by this player.
     /// </summary>
     public ICollection<InventoryItem> InventoryItems { get; set; } = [];
+
+    /// <summary>
+    /// Navigation property: chat messages authored by this player in the hub.
+    /// </summary>
+    public ICollection<HubChatMessage> HubChatMessages { get; set; } = [];
 }

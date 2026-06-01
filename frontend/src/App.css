@@ -303,6 +303,25 @@ button.danger {
   gap: 8px;
 }
 
+.chat-compose-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.chat-feed {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.chat-feed li {
+  color: var(--text-strong);
+}
+
 .quest-list {
   display: grid;
   gap: 12px;

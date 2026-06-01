@@ -44,6 +44,12 @@ public class DungeonCrawlerDbContext : DbContext
     /// </summary>
     public DbSet<InventoryItem> InventoryItems { get; set; }
 
+    /// <summary>
+    /// DbSet for HubChatMessage entities.
+    /// Stores recent and historical hub chat communication.
+    /// </summary>
+    public DbSet<HubChatMessage> HubChatMessages { get; set; }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -275,6 +281,40 @@ public class DungeonCrawlerDbContext : DbContext
             .HasOne(ii => ii.Account)
             .WithMany(a => a.InventoryItems)
             .HasForeignKey(ii => ii.AccountId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Configure HubChatMessage entity
+        modelBuilder.Entity<HubChatMessage>()
+            .ToTable("hub_chat_messages")
+            .HasKey(cm => cm.HubChatMessageId);
+
+        modelBuilder.Entity<HubChatMessage>()
+            .Property(cm => cm.HubChatMessageId)
+            .HasColumnName("hub_chat_message_id");
+
+        modelBuilder.Entity<HubChatMessage>()
+            .Property(cm => cm.AccountId)
+            .HasColumnName("account_id");
+
+        modelBuilder.Entity<HubChatMessage>()
+            .Property(cm => cm.Message)
+            .HasColumnName("message")
+            .HasMaxLength(280)
+            .IsRequired();
+
+        modelBuilder.Entity<HubChatMessage>()
+            .Property(cm => cm.SentAt)
+            .HasColumnName("sent_at")
+            .HasDefaultValueSql("NOW()");
+
+        modelBuilder.Entity<HubChatMessage>()
+            .HasIndex(cm => cm.SentAt)
+            .HasDatabaseName("ix_hub_chat_messages_sent_at");
+
+        modelBuilder.Entity<HubChatMessage>()
+            .HasOne(cm => cm.Account)
+            .WithMany(a => a.HubChatMessages)
+            .HasForeignKey(cm => cm.AccountId)
             .OnDelete(DeleteBehavior.Cascade);
     }
 }
