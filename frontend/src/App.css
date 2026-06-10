@@ -130,11 +130,13 @@
 }
 
 input,
+select,
 button {
   font: inherit;
 }
 
-input {
+input,
+select {
   border: 1px solid var(--border-soft);
   border-radius: 14px;
   padding: 14px 16px;
@@ -142,7 +144,8 @@ input {
   color: var(--text-strong);
 }
 
-input:focus {
+input:focus,
+select:focus {
   outline: 2px solid rgba(191, 112, 37, 0.28);
   border-color: rgba(191, 112, 37, 0.5);
 }
@@ -322,6 +325,36 @@ button.danger {
   color: var(--text-strong);
 }
 
+.trade-compose-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.trade-compose-grid label {
+  display: grid;
+  gap: 6px;
+}
+
+.trade-compose-grid span {
+  font-size: 0.86rem;
+  color: var(--muted);
+}
+
+.trade-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.roster-list li {
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
 .quest-list {
   display: grid;
   gap: 12px;
@@ -400,6 +433,10 @@ button.danger {
   }
 
   .combat-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .trade-compose-grid {
     grid-template-columns: 1fr;
   }
 }

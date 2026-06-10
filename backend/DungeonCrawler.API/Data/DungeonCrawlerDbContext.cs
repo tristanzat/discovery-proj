@@ -50,6 +50,12 @@ public class DungeonCrawlerDbContext : DbContext
     /// </summary>
     public DbSet<HubChatMessage> HubChatMessages { get; set; }
 
+    /// <summary>
+    /// DbSet for TradeOffer entities.
+    /// Tracks trading state between players in the hub.
+    /// </summary>
+    public DbSet<TradeOffer> TradeOffers { get; set; }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -315,6 +321,86 @@ public class DungeonCrawlerDbContext : DbContext
             .HasOne(cm => cm.Account)
             .WithMany(a => a.HubChatMessages)
             .HasForeignKey(cm => cm.AccountId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Configure TradeOffer entity
+        modelBuilder.Entity<TradeOffer>()
+            .ToTable("trade_offers")
+            .HasKey(to => to.TradeOfferId);
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.TradeOfferId)
+            .HasColumnName("trade_offer_id");
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.FromAccountId)
+            .HasColumnName("from_account_id");
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.ToAccountId)
+            .HasColumnName("to_account_id");
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.ItemCode)
+            .HasColumnName("item_code")
+            .HasMaxLength(64)
+            .IsRequired();
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.ItemName)
+            .HasColumnName("item_name")
+            .HasMaxLength(100)
+            .IsRequired();
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.Rarity)
+            .HasColumnName("rarity")
+            .HasMaxLength(24)
+            .IsRequired();
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.Quantity)
+            .HasColumnName("quantity")
+            .IsRequired();
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.Note)
+            .HasColumnName("note")
+            .HasMaxLength(180);
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.Status)
+            .HasColumnName("status")
+            .HasMaxLength(24)
+            .IsRequired();
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.CreatedAt)
+            .HasColumnName("created_at")
+            .HasDefaultValueSql("NOW()");
+
+        modelBuilder.Entity<TradeOffer>()
+            .Property(to => to.RespondedAt)
+            .HasColumnName("responded_at");
+
+        modelBuilder.Entity<TradeOffer>()
+            .HasIndex(to => new { to.ToAccountId, to.Status, to.CreatedAt })
+            .HasDatabaseName("ix_trade_offers_to_status_created");
+
+        modelBuilder.Entity<TradeOffer>()
+            .HasIndex(to => new { to.FromAccountId, to.Status, to.CreatedAt })
+            .HasDatabaseName("ix_trade_offers_from_status_created");
+
+        modelBuilder.Entity<TradeOffer>()
+            .HasOne(to => to.FromAccount)
+            .WithMany(a => a.SentTradeOffers)
+            .HasForeignKey(to => to.FromAccountId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<TradeOffer>()
+            .HasOne(to => to.ToAccount)
+            .WithMany(a => a.ReceivedTradeOffers)
+            .HasForeignKey(to => to.ToAccountId)
             .OnDelete(DeleteBehavior.Cascade);
     }
 }

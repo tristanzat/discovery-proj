@@ -50,4 +50,14 @@ public class Account
     /// Navigation property: chat messages authored by this player in the hub.
     /// </summary>
     public ICollection<HubChatMessage> HubChatMessages { get; set; } = [];
+
+    /// <summary>
+    /// Navigation property: trade offers sent by this player.
+    /// </summary>
+    public ICollection<TradeOffer> SentTradeOffers { get; set; } = [];
+
+    /// <summary>
+    /// Navigation property: trade offers received by this player.
+    /// </summary>
+    public ICollection<TradeOffer> ReceivedTradeOffers { get; set; } = [];
 }

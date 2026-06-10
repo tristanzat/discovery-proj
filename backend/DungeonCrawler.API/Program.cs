@@ -103,6 +103,26 @@ using (var scope = app.Services.CreateScope())
         CREATE INDEX IF NOT EXISTS ix_hub_chat_messages_sent_at
             ON hub_chat_messages(sent_at DESC);
 
+        CREATE TABLE IF NOT EXISTS trade_offers (
+            trade_offer_id BIGSERIAL PRIMARY KEY,
+            from_account_id INT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+            to_account_id INT NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
+            item_code VARCHAR(64) NOT NULL,
+            item_name VARCHAR(100) NOT NULL,
+            rarity VARCHAR(24) NOT NULL,
+            quantity INT NOT NULL,
+            note VARCHAR(180),
+            status VARCHAR(24) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            responded_at TIMESTAMPTZ NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS ix_trade_offers_to_status_created
+            ON trade_offers(to_account_id, status, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS ix_trade_offers_from_status_created
+            ON trade_offers(from_account_id, status, created_at DESC);
+
         ALTER TABLE quest_definitions
             ADD COLUMN IF NOT EXISTS enemy_type_tag VARCHAR(64) NULL;
         """);
@@ -1026,6 +1046,360 @@ app.MapPost("/hub/chat/send", async (
 })
 .WithName("SendHubChatMessage");
 
+app.MapGet("/hub/roster/{accountId:int}", async (
+    int accountId,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var accountExists = await dbContext.Accounts
+        .AsNoTracking()
+        .AnyAsync(a => a.AccountId == accountId, cancellationToken);
+
+    if (!accountExists)
+    {
+        return Results.NotFound(new { error = "Account not found." });
+    }
+
+    var roster = await dbContext.Accounts
+        .AsNoTracking()
+        .Where(a => a.AccountId != accountId)
+        .OrderBy(a => a.Username)
+        .GroupJoin(
+            dbContext.PlayerProgresses.AsNoTracking(),
+            a => a.AccountId,
+            pp => pp.AccountId,
+            (a, pps) => new { Account = a, Progress = pps.FirstOrDefault() })
+        .Take(40)
+        .Select(row => new
+        {
+            accountId = row.Account.AccountId,
+            username = row.Account.Username,
+            level = row.Progress != null ? row.Progress.Level : 1,
+            gold = row.Progress != null ? row.Progress.Gold : 0,
+            lastSavedAt = row.Progress != null ? row.Progress.LastSavedAt : (DateTime?)null
+        })
+        .ToListAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        accountId,
+        rosterCount = roster.Count,
+        roster
+    });
+})
+.WithName("GetHubRoster");
+
+app.MapGet("/trade/offers/{accountId:int}", async (
+    int accountId,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var accountExists = await dbContext.Accounts
+        .AsNoTracking()
+        .AnyAsync(a => a.AccountId == accountId, cancellationToken);
+
+    if (!accountExists)
+    {
+        return Results.NotFound(new { error = "Account not found." });
+    }
+
+    var offers = await dbContext.TradeOffers
+        .AsNoTracking()
+        .Include(to => to.FromAccount)
+        .Include(to => to.ToAccount)
+        .Where(to => to.FromAccountId == accountId || to.ToAccountId == accountId)
+        .OrderByDescending(to => to.CreatedAt)
+        .Take(60)
+        .Select(to => new
+        {
+            tradeOfferId = to.TradeOfferId,
+            fromAccountId = to.FromAccountId,
+            fromUsername = to.FromAccount != null ? to.FromAccount.Username : "unknown",
+            toAccountId = to.ToAccountId,
+            toUsername = to.ToAccount != null ? to.ToAccount.Username : "unknown",
+            itemCode = to.ItemCode,
+            itemName = to.ItemName,
+            rarity = to.Rarity,
+            quantity = to.Quantity,
+            note = to.Note,
+            status = to.Status,
+            createdAt = to.CreatedAt,
+            respondedAt = to.RespondedAt
+        })
+        .ToListAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        accountId,
+        offerCount = offers.Count,
+        offers
+    });
+})
+.WithName("GetTradeOffers");
+
+app.MapPost("/trade/offers/send", async (
+    SendTradeOfferRequest request,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    if (request.Quantity <= 0)
+    {
+        return Results.BadRequest(new { error = "Quantity must be at least 1." });
+    }
+
+    if (string.IsNullOrWhiteSpace(request.ToUsername) || string.IsNullOrWhiteSpace(request.ItemCode))
+    {
+        return Results.BadRequest(new { error = "Recipient username and item code are required." });
+    }
+
+    var toUsername = request.ToUsername.Trim();
+    var itemCode = request.ItemCode.Trim();
+    var note = string.IsNullOrWhiteSpace(request.Note) ? null : request.Note.Trim();
+
+    if (note is not null && note.Length > 180)
+    {
+        return Results.BadRequest(new { error = "Trade note cannot exceed 180 characters." });
+    }
+
+    var fromAccount = await dbContext.Accounts
+        .AsNoTracking()
+        .FirstOrDefaultAsync(a => a.AccountId == request.FromAccountId, cancellationToken);
+
+    if (fromAccount is null)
+    {
+        return Results.NotFound(new { error = "Sender account not found." });
+    }
+
+    var toAccount = await dbContext.Accounts
+        .AsNoTracking()
+        .FirstOrDefaultAsync(a => a.Username == toUsername, cancellationToken);
+
+    if (toAccount is null)
+    {
+        return Results.NotFound(new { error = "Recipient account not found." });
+    }
+
+    if (toAccount.AccountId == request.FromAccountId)
+    {
+        return Results.BadRequest(new { error = "You cannot trade with yourself." });
+    }
+
+    var senderStack = await dbContext.InventoryItems
+        .FirstOrDefaultAsync(
+            ii => ii.AccountId == request.FromAccountId && ii.ItemCode == itemCode,
+            cancellationToken);
+
+    if (senderStack is null || senderStack.Quantity < request.Quantity)
+    {
+        return Results.BadRequest(new { error = "Not enough item quantity available for this trade." });
+    }
+
+    var offer = new TradeOffer
+    {
+        FromAccountId = request.FromAccountId,
+        ToAccountId = toAccount.AccountId,
+        ItemCode = senderStack.ItemCode,
+        ItemName = senderStack.ItemName,
+        Rarity = senderStack.Rarity,
+        Quantity = request.Quantity,
+        Note = note,
+        Status = "pending",
+        CreatedAt = DateTime.UtcNow,
+        RespondedAt = null
+    };
+
+    // Move items into escrow by removing them from the sender stack immediately.
+    senderStack.Quantity -= request.Quantity;
+    if (senderStack.Quantity <= 0)
+    {
+        dbContext.InventoryItems.Remove(senderStack);
+    }
+
+    dbContext.TradeOffers.Add(offer);
+    await dbContext.SaveChangesAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        message = "trade-offer-sent",
+        tradeOfferId = offer.TradeOfferId,
+        fromAccountId = offer.FromAccountId,
+        fromUsername = fromAccount.Username,
+        toAccountId = offer.ToAccountId,
+        toUsername = toAccount.Username,
+        itemCode = offer.ItemCode,
+        itemName = offer.ItemName,
+        rarity = offer.Rarity,
+        quantity = offer.Quantity,
+        status = offer.Status,
+        createdAt = offer.CreatedAt
+    });
+})
+.WithName("SendTradeOffer");
+
+app.MapPost("/trade/offers/respond", async (
+    RespondTradeOfferRequest request,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.Action))
+    {
+        return Results.BadRequest(new { error = "Action is required." });
+    }
+
+    var action = request.Action.Trim().ToLowerInvariant();
+    if (action is not ("accept" or "reject"))
+    {
+        return Results.BadRequest(new { error = "Action must be 'accept' or 'reject'." });
+    }
+
+    var offer = await dbContext.TradeOffers
+        .FirstOrDefaultAsync(to => to.TradeOfferId == request.TradeOfferId, cancellationToken);
+
+    if (offer is null)
+    {
+        return Results.NotFound(new { error = "Trade offer not found." });
+    }
+
+    if (offer.ToAccountId != request.AccountId)
+    {
+        return Results.BadRequest(new { error = "This account is not the recipient for the trade offer." });
+    }
+
+    if (offer.Status != "pending")
+    {
+        return Results.Conflict(new { error = "Only pending trade offers can be resolved." });
+    }
+
+    if (action == "accept")
+    {
+        var recipientStack = await dbContext.InventoryItems
+            .FirstOrDefaultAsync(
+                ii => ii.AccountId == offer.ToAccountId && ii.ItemCode == offer.ItemCode,
+                cancellationToken);
+
+        if (recipientStack is null)
+        {
+            dbContext.InventoryItems.Add(new InventoryItem
+            {
+                AccountId = offer.ToAccountId,
+                ItemCode = offer.ItemCode,
+                ItemName = offer.ItemName,
+                Rarity = offer.Rarity,
+                Quantity = offer.Quantity,
+                AcquiredAt = DateTime.UtcNow
+            });
+        }
+        else
+        {
+            recipientStack.Quantity += offer.Quantity;
+            recipientStack.AcquiredAt = DateTime.UtcNow;
+        }
+
+        offer.Status = "accepted";
+        offer.RespondedAt = DateTime.UtcNow;
+    }
+    else
+    {
+        var senderStack = await dbContext.InventoryItems
+            .FirstOrDefaultAsync(
+                ii => ii.AccountId == offer.FromAccountId && ii.ItemCode == offer.ItemCode,
+                cancellationToken);
+
+        if (senderStack is null)
+        {
+            dbContext.InventoryItems.Add(new InventoryItem
+            {
+                AccountId = offer.FromAccountId,
+                ItemCode = offer.ItemCode,
+                ItemName = offer.ItemName,
+                Rarity = offer.Rarity,
+                Quantity = offer.Quantity,
+                AcquiredAt = DateTime.UtcNow
+            });
+        }
+        else
+        {
+            senderStack.Quantity += offer.Quantity;
+            senderStack.AcquiredAt = DateTime.UtcNow;
+        }
+
+        offer.Status = "rejected";
+        offer.RespondedAt = DateTime.UtcNow;
+    }
+
+    await dbContext.SaveChangesAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        message = "trade-offer-resolved",
+        tradeOfferId = offer.TradeOfferId,
+        status = offer.Status,
+        respondedAt = offer.RespondedAt
+    });
+})
+.WithName("RespondTradeOffer");
+
+app.MapPost("/trade/offers/cancel", async (
+    CancelTradeOfferRequest request,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var offer = await dbContext.TradeOffers
+        .FirstOrDefaultAsync(to => to.TradeOfferId == request.TradeOfferId, cancellationToken);
+
+    if (offer is null)
+    {
+        return Results.NotFound(new { error = "Trade offer not found." });
+    }
+
+    if (offer.FromAccountId != request.AccountId)
+    {
+        return Results.BadRequest(new { error = "This account did not create the trade offer." });
+    }
+
+    if (offer.Status != "pending")
+    {
+        return Results.Conflict(new { error = "Only pending trade offers can be cancelled." });
+    }
+
+    var senderStack = await dbContext.InventoryItems
+        .FirstOrDefaultAsync(
+            ii => ii.AccountId == offer.FromAccountId && ii.ItemCode == offer.ItemCode,
+            cancellationToken);
+
+    if (senderStack is null)
+    {
+        dbContext.InventoryItems.Add(new InventoryItem
+        {
+            AccountId = offer.FromAccountId,
+            ItemCode = offer.ItemCode,
+            ItemName = offer.ItemName,
+            Rarity = offer.Rarity,
+            Quantity = offer.Quantity,
+            AcquiredAt = DateTime.UtcNow
+        });
+    }
+    else
+    {
+        senderStack.Quantity += offer.Quantity;
+        senderStack.AcquiredAt = DateTime.UtcNow;
+    }
+
+    offer.Status = "cancelled";
+    offer.RespondedAt = DateTime.UtcNow;
+
+    await dbContext.SaveChangesAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        message = "trade-offer-cancelled",
+        tradeOfferId = offer.TradeOfferId,
+        status = offer.Status,
+        respondedAt = offer.RespondedAt
+    });
+})
+.WithName("CancelTradeOffer");
+
 app.Run();
 
 internal sealed record RegisterRequest(string Username, string Password);
@@ -1037,3 +1411,6 @@ internal sealed record CompleteQuestRequest(int AccountId, string QuestId);
 internal sealed record AbandonQuestRequest(int AccountId, string QuestId);
 internal sealed record UseInventoryItemRequest(int AccountId, string SessionId, string ItemCode);
 internal sealed record SendHubChatMessageRequest(int AccountId, string Message);
+internal sealed record SendTradeOfferRequest(int FromAccountId, string ToUsername, string ItemCode, int Quantity, string? Note);
+internal sealed record RespondTradeOfferRequest(int AccountId, long TradeOfferId, string Action);
+internal sealed record CancelTradeOfferRequest(int AccountId, long TradeOfferId);

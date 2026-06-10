@@ -112,6 +112,42 @@ type HubOverviewResponse = {
   messages: HubChatMessage[]
 }
 
+type HubRosterEntry = {
+  accountId: number
+  username: string
+  level: number
+  gold: number
+  lastSavedAt: string | null
+}
+
+type HubRosterResponse = {
+  accountId: number
+  rosterCount: number
+  roster: HubRosterEntry[]
+}
+
+type TradeOffer = {
+  tradeOfferId: number
+  fromAccountId: number
+  fromUsername: string
+  toAccountId: number
+  toUsername: string
+  itemCode: string
+  itemName: string
+  rarity: string
+  quantity: number
+  note: string | null
+  status: string
+  createdAt: string
+  respondedAt: string | null
+}
+
+type TradeOffersResponse = {
+  accountId: number
+  offerCount: number
+  offers: TradeOffer[]
+}
+
 type CombatQuestProgressUpdate = {
   questId: string
   progressCount: number
@@ -214,8 +250,14 @@ function App() {
   const [questLog, setQuestLog] = useState<QuestLogItem[]>([])
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([])
   const [hubChatMessages, setHubChatMessages] = useState<HubChatMessage[]>([])
+  const [hubRoster, setHubRoster] = useState<HubRosterEntry[]>([])
   const [activeAdventurerCount, setActiveAdventurerCount] = useState(0)
   const [hubMessageDraft, setHubMessageDraft] = useState('')
+  const [tradeOffers, setTradeOffers] = useState<TradeOffer[]>([])
+  const [tradeRecipientUsername, setTradeRecipientUsername] = useState('')
+  const [tradeItemCode, setTradeItemCode] = useState('')
+  const [tradeQuantity, setTradeQuantity] = useState(1)
+  const [tradeNote, setTradeNote] = useState('')
   const [activity, setActivity] = useState<string[]>([
     'Welcome to Phase 3. Log in, enter the hub, and chat before diving into combat.',
   ])
@@ -294,6 +336,18 @@ function App() {
     return response
   }
 
+  async function loadHubRoster(accountId: number) {
+    const response = await requestJson<HubRosterResponse>(`/api/hub/roster/${accountId}`)
+    setHubRoster(response.roster)
+    return response.roster
+  }
+
+  async function loadTradeOffers(accountId: number) {
+    const response = await requestJson<TradeOffersResponse>(`/api/trade/offers/${accountId}`)
+    setTradeOffers(response.offers)
+    return response.offers
+  }
+
   async function refreshPhaseTwoState(accountId: number) {
     await Promise.all([
       loadProgress(accountId),
@@ -301,6 +355,8 @@ function App() {
       loadQuestLog(accountId),
       loadInventory(accountId),
       loadHubOverview(accountId),
+      loadHubRoster(accountId),
+      loadTradeOffers(accountId),
     ])
   }
 
@@ -370,8 +426,8 @@ function App() {
     }
 
     await withSubmission(async () => {
-      await loadHubOverview(account.accountId)
-      pushActivity('Refreshed hub overview and chat feed.')
+      await Promise.all([loadHubOverview(account.accountId), loadHubRoster(account.accountId)])
+      pushActivity('Refreshed hub overview, roster, and chat feed.')
     })
   }
 
@@ -394,6 +450,89 @@ function App() {
       setHubMessageDraft('')
       await loadHubOverview(account.accountId)
       pushActivity(`Hub chat: ${account.username} says "${message}"`)
+    })
+  }
+
+  async function handleSendTradeOffer() {
+    if (!account) {
+      return
+    }
+
+    const toUsername = tradeRecipientUsername.trim()
+    const itemCode = tradeItemCode.trim()
+    const quantity = Math.max(1, Math.floor(tradeQuantity))
+    const note = tradeNote.trim()
+    const selectedItem = tradeableItems.find((item) => item.itemCode === itemCode)
+
+    if (!toUsername || !itemCode) {
+      return
+    }
+
+    if (!selectedItem) {
+      return
+    }
+
+    if (quantity > selectedItem.quantity) {
+      setErrorMessage(`You only have ${selectedItem.quantity} of ${selectedItem.itemName}.`)
+      return
+    }
+
+    await withSubmission(async () => {
+      await requestJson<{ message: string }>('/api/trade/offers/send', {
+        method: 'POST',
+        body: JSON.stringify({
+          fromAccountId: account.accountId,
+          toUsername,
+          itemCode,
+          quantity,
+          note: note.length > 0 ? note : null,
+        }),
+      })
+
+      setTradeRecipientUsername('')
+      setTradeNote('')
+      setTradeQuantity(1)
+      await Promise.all([loadInventory(account.accountId), loadTradeOffers(account.accountId)])
+      pushActivity(`Trade offer sent: ${quantity}x ${itemCode} to ${toUsername}.`)
+    })
+  }
+
+  async function handleRespondTradeOffer(tradeOfferId: number, action: 'accept' | 'reject') {
+    if (!account) {
+      return
+    }
+
+    await withSubmission(async () => {
+      await requestJson<{ message: string }>('/api/trade/offers/respond', {
+        method: 'POST',
+        body: JSON.stringify({
+          accountId: account.accountId,
+          tradeOfferId,
+          action,
+        }),
+      })
+
+      await Promise.all([loadInventory(account.accountId), loadTradeOffers(account.accountId)])
+      pushActivity(`Trade offer #${tradeOfferId} ${action}ed.`)
+    })
+  }
+
+  async function handleCancelTradeOffer(tradeOfferId: number) {
+    if (!account) {
+      return
+    }
+
+    await withSubmission(async () => {
+      await requestJson<{ message: string }>('/api/trade/offers/cancel', {
+        method: 'POST',
+        body: JSON.stringify({
+          accountId: account.accountId,
+          tradeOfferId,
+        }),
+      })
+
+      await Promise.all([loadInventory(account.accountId), loadTradeOffers(account.accountId)])
+      pushActivity(`Trade offer #${tradeOfferId} cancelled.`)
     })
   }
 
@@ -574,6 +713,27 @@ function App() {
   const usableCombatItems = useMemo(
     () => inventoryItems.filter((item) => isCombatConsumable(item.itemCode)),
     [inventoryItems],
+  )
+  const tradeableItems = inventoryItems.filter((item) => item.quantity > 0)
+  const selectedTradeItem = tradeableItems.find((item) => item.itemCode === tradeItemCode)
+  const maxTradeQuantity = selectedTradeItem?.quantity ?? 1
+  const incomingOffers = useMemo(
+    () =>
+      account
+        ? tradeOffers.filter(
+            (offer) => offer.toAccountId === account.accountId && offer.status === 'pending',
+          )
+        : [],
+    [account, tradeOffers],
+  )
+  const outgoingOffers = useMemo(
+    () =>
+      account
+        ? tradeOffers.filter(
+            (offer) => offer.fromAccountId === account.accountId && offer.status === 'pending',
+          )
+        : [],
+    [account, tradeOffers],
   )
 
   return (
@@ -867,6 +1027,170 @@ function App() {
                 {hubChatMessages.map((message) => (
                   <li key={message.messageId}>
                     <strong>{message.username}</strong>: {message.message}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="panel-inset">
+            <div className="eyebrow-row">
+              <h3>Trading post</h3>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => account && void loadTradeOffers(account.accountId)}
+                disabled={!hasAccount || isSubmitting || apiStatus !== 'online'}
+              >
+                Refresh trades
+              </button>
+            </div>
+
+            <div className="trade-compose-grid">
+              <label>
+                <span>Recipient username</span>
+                <input
+                  value={tradeRecipientUsername}
+                  onChange={(event) => setTradeRecipientUsername(event.target.value)}
+                  placeholder="RogueCartographer"
+                  disabled={!hasAccount || isSubmitting || apiStatus !== 'online'}
+                />
+              </label>
+
+              <label>
+                <span>Inventory item</span>
+                <select
+                  value={tradeItemCode}
+                  onChange={(event) => setTradeItemCode(event.target.value)}
+                  disabled={!hasAccount || isSubmitting || apiStatus !== 'online'}
+                >
+                  <option value="">Select item</option>
+                  {tradeableItems.map((item) => (
+                    <option key={item.itemCode} value={item.itemCode}>
+                      {item.itemName} ({item.rarity}) x{item.quantity}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label>
+                <span>Quantity</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={maxTradeQuantity}
+                  value={tradeQuantity}
+                  onChange={(event) => setTradeQuantity(Number(event.target.value) || 1)}
+                  disabled={!hasAccount || isSubmitting || apiStatus !== 'online'}
+                />
+              </label>
+
+              <label>
+                <span>Optional note</span>
+                <input
+                  value={tradeNote}
+                  onChange={(event) => setTradeNote(event.target.value)}
+                  maxLength={180}
+                  placeholder="Offer from the last goblin run"
+                  disabled={!hasAccount || isSubmitting || apiStatus !== 'online'}
+                />
+              </label>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => void handleSendTradeOffer()}
+              disabled={
+                !hasAccount ||
+                isSubmitting ||
+                apiStatus !== 'online' ||
+                tradeRecipientUsername.trim().length === 0 ||
+                tradeItemCode.trim().length === 0 ||
+                tradeQuantity <= 0 ||
+                tradeQuantity > maxTradeQuantity
+              }
+            >
+              Send trade offer
+            </button>
+
+            {selectedTradeItem ? (
+              <p>
+                Available: {selectedTradeItem.itemName} x{selectedTradeItem.quantity}
+              </p>
+            ) : null}
+
+            <h3>Hub roster</h3>
+            {hubRoster.length === 0 ? (
+              <p>No other adventurers visible in the hub.</p>
+            ) : (
+              <ul className="roster-list compact-list">
+                {hubRoster.map((entry) => (
+                  <li key={entry.accountId}>
+                    <strong>{entry.username}</strong> (Lv {entry.level}, Gold {entry.gold})
+                    <div className="trade-action-row">
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => setTradeRecipientUsername(entry.username)}
+                        disabled={!hasAccount || isSubmitting || apiStatus !== 'online'}
+                      >
+                        Target for trade
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <h3>Incoming offers</h3>
+            {incomingOffers.length === 0 ? (
+              <p>No incoming trade offers.</p>
+            ) : (
+              <ul className="compact-list">
+                {incomingOffers.map((offer) => (
+                  <li key={offer.tradeOfferId}>
+                    From {offer.fromUsername}: {offer.itemName} x{offer.quantity}
+                    <div className="trade-action-row">
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => void handleRespondTradeOffer(offer.tradeOfferId, 'accept')}
+                        disabled={isSubmitting || apiStatus !== 'online'}
+                      >
+                        Accept
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={() => void handleRespondTradeOffer(offer.tradeOfferId, 'reject')}
+                        disabled={isSubmitting || apiStatus !== 'online'}
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <h3>Outgoing offers</h3>
+            {outgoingOffers.length === 0 ? (
+              <p>No outgoing trade offers.</p>
+            ) : (
+              <ul className="compact-list">
+                {outgoingOffers.map((offer) => (
+                  <li key={offer.tradeOfferId}>
+                    To {offer.toUsername}: {offer.itemName} x{offer.quantity}
+                    <div className="trade-action-row">
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={() => void handleCancelTradeOffer(offer.tradeOfferId)}
+                        disabled={isSubmitting || apiStatus !== 'online'}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </li>
                 ))}
               </ul>
