@@ -56,6 +56,12 @@ public class DungeonCrawlerDbContext : DbContext
     /// </summary>
     public DbSet<TradeOffer> TradeOffers { get; set; }
 
+    /// <summary>
+    /// DbSet for HubPresence entities.
+    /// Tracks active player participation in the hub overworld.
+    /// </summary>
+    public DbSet<HubPresence> HubPresences { get; set; }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -401,6 +407,30 @@ public class DungeonCrawlerDbContext : DbContext
             .HasOne(to => to.ToAccount)
             .WithMany(a => a.ReceivedTradeOffers)
             .HasForeignKey(to => to.ToAccountId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Configure HubPresence entity
+        modelBuilder.Entity<HubPresence>()
+            .ToTable("hub_presence")
+            .HasKey(hp => hp.AccountId);
+
+        modelBuilder.Entity<HubPresence>()
+            .Property(hp => hp.AccountId)
+            .HasColumnName("account_id");
+
+        modelBuilder.Entity<HubPresence>()
+            .Property(hp => hp.LastSeenAt)
+            .HasColumnName("last_seen_at")
+            .HasDefaultValueSql("NOW()");
+
+        modelBuilder.Entity<HubPresence>()
+            .HasIndex(hp => hp.LastSeenAt)
+            .HasDatabaseName("ix_hub_presence_last_seen");
+
+        modelBuilder.Entity<HubPresence>()
+            .HasOne(hp => hp.Account)
+            .WithOne(a => a.HubPresence)
+            .HasForeignKey<HubPresence>(hp => hp.AccountId)
             .OnDelete(DeleteBehavior.Cascade);
     }
 }

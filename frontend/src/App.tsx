@@ -117,6 +117,7 @@ type HubRosterEntry = {
   username: string
   level: number
   gold: number
+  lastSeenAt: string
   lastSavedAt: string | null
 }
 
@@ -336,6 +337,13 @@ function App() {
     return response
   }
 
+  async function pingHubPresence(accountId: number) {
+    await requestJson<{ message: string }>('/api/hub/presence/ping', {
+      method: 'POST',
+      body: JSON.stringify({ accountId }),
+    })
+  }
+
   async function loadHubRoster(accountId: number) {
     const response = await requestJson<HubRosterResponse>(`/api/hub/roster/${accountId}`)
     setHubRoster(response.roster)
@@ -349,6 +357,8 @@ function App() {
   }
 
   async function refreshPhaseTwoState(accountId: number) {
+    await pingHubPresence(accountId)
+
     await Promise.all([
       loadProgress(accountId),
       loadAvailableQuests(accountId),
@@ -426,6 +436,7 @@ function App() {
     }
 
     await withSubmission(async () => {
+      await pingHubPresence(account.accountId)
       await Promise.all([loadHubOverview(account.accountId), loadHubRoster(account.accountId)])
       pushActivity('Refreshed hub overview, roster, and chat feed.')
     })
@@ -735,6 +746,21 @@ function App() {
         : [],
     [account, tradeOffers],
   )
+
+  useEffect(() => {
+    if (!account || apiStatus !== 'online') {
+      return
+    }
+
+    const intervalId = setInterval(() => {
+      void pingHubPresence(account.accountId)
+      void Promise.all([loadHubOverview(account.accountId), loadHubRoster(account.accountId)])
+    }, 30000)
+
+    return () => {
+      clearInterval(intervalId)
+    }
+  }, [account, apiStatus])
 
   return (
     <main className="app-shell">

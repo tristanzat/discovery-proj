@@ -24,6 +24,27 @@ builder.Services.AddSingleton<IInventoryItemEffectService, InventoryItemEffectSe
 
 var app = builder.Build();
 
+static async Task MarkHubPresenceAsync(
+    DungeonCrawlerDbContext dbContext,
+    int accountId,
+    CancellationToken cancellationToken)
+{
+    var existing = await dbContext.HubPresences
+        .FirstOrDefaultAsync(hp => hp.AccountId == accountId, cancellationToken);
+
+    if (existing is null)
+    {
+        dbContext.HubPresences.Add(new HubPresence
+        {
+            AccountId = accountId,
+            LastSeenAt = DateTime.UtcNow
+        });
+        return;
+    }
+
+    existing.LastSeenAt = DateTime.UtcNow;
+}
+
 var starterQuestDefinitions = new[]
 {
     new QuestDefinition
@@ -122,6 +143,14 @@ using (var scope = app.Services.CreateScope())
 
         CREATE INDEX IF NOT EXISTS ix_trade_offers_from_status_created
             ON trade_offers(from_account_id, status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS hub_presence (
+            account_id INT PRIMARY KEY REFERENCES accounts(account_id) ON DELETE CASCADE,
+            last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS ix_hub_presence_last_seen
+            ON hub_presence(last_seen_at DESC);
 
         ALTER TABLE quest_definitions
             ADD COLUMN IF NOT EXISTS enemy_type_tag VARCHAR(64) NULL;
@@ -222,6 +251,8 @@ app.MapPost("/auth/register", async (
         AcquiredAt = DateTime.UtcNow
     });
 
+    await MarkHubPresenceAsync(dbContext, account.AccountId, cancellationToken);
+
     await dbContext.SaveChangesAsync(cancellationToken);
 
     return Results.Created($"/accounts/{account.AccountId}", new
@@ -256,6 +287,9 @@ app.MapPost("/auth/login", async (
     var progress = await dbContext.PlayerProgresses
         .AsNoTracking()
         .FirstOrDefaultAsync(pp => pp.AccountId == account.AccountId, cancellationToken);
+
+    await MarkHubPresenceAsync(dbContext, account.AccountId, cancellationToken);
+    await dbContext.SaveChangesAsync(cancellationToken);
 
     // NOTE: Stage 3 returns basic login payload only.
     // JWT/session token issuing is a later step.
@@ -925,9 +959,10 @@ app.MapGet("/hub/overview/{accountId:int}", async (
         return Results.NotFound(new { error = "Account not found." });
     }
 
-    var activeAdventurerCount = await dbContext.Accounts
+    var cutoffUtc = DateTime.UtcNow.AddMinutes(-10);
+    var activeAdventurerCount = await dbContext.HubPresences
         .AsNoTracking()
-        .CountAsync(cancellationToken);
+        .CountAsync(hp => hp.LastSeenAt >= cutoffUtc, cancellationToken);
 
     var latestMessages = await dbContext.HubChatMessages
         .AsNoTracking()
@@ -1029,6 +1064,7 @@ app.MapPost("/hub/chat/send", async (
     };
 
     dbContext.HubChatMessages.Add(chatMessage);
+    await MarkHubPresenceAsync(dbContext, request.AccountId, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
 
     return Results.Ok(new
@@ -1046,6 +1082,32 @@ app.MapPost("/hub/chat/send", async (
 })
 .WithName("SendHubChatMessage");
 
+app.MapPost("/hub/presence/ping", async (
+    PingHubPresenceRequest request,
+    DungeonCrawlerDbContext dbContext,
+    CancellationToken cancellationToken) =>
+{
+    var accountExists = await dbContext.Accounts
+        .AsNoTracking()
+        .AnyAsync(a => a.AccountId == request.AccountId, cancellationToken);
+
+    if (!accountExists)
+    {
+        return Results.NotFound(new { error = "Account not found." });
+    }
+
+    await MarkHubPresenceAsync(dbContext, request.AccountId, cancellationToken);
+    await dbContext.SaveChangesAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        message = "hub-presence-updated",
+        accountId = request.AccountId,
+        seenAt = DateTime.UtcNow
+    });
+})
+.WithName("PingHubPresence");
+
 app.MapGet("/hub/roster/{accountId:int}", async (
     int accountId,
     DungeonCrawlerDbContext dbContext,
@@ -1060,15 +1122,22 @@ app.MapGet("/hub/roster/{accountId:int}", async (
         return Results.NotFound(new { error = "Account not found." });
     }
 
-    var roster = await dbContext.Accounts
+    var cutoffUtc = DateTime.UtcNow.AddMinutes(-10);
+
+    var roster = await dbContext.HubPresences
         .AsNoTracking()
-        .Where(a => a.AccountId != accountId)
-        .OrderBy(a => a.Username)
+        .Where(hp => hp.AccountId != accountId && hp.LastSeenAt >= cutoffUtc)
+        .Join(
+            dbContext.Accounts.AsNoTracking(),
+            hp => hp.AccountId,
+            a => a.AccountId,
+            (hp, a) => new { Presence = hp, Account = a })
         .GroupJoin(
             dbContext.PlayerProgresses.AsNoTracking(),
-            a => a.AccountId,
+            row => row.Account.AccountId,
             pp => pp.AccountId,
-            (a, pps) => new { Account = a, Progress = pps.FirstOrDefault() })
+            (row, pps) => new { row.Presence, row.Account, Progress = pps.FirstOrDefault() })
+        .OrderBy(row => row.Account.Username)
         .Take(40)
         .Select(row => new
         {
@@ -1076,6 +1145,7 @@ app.MapGet("/hub/roster/{accountId:int}", async (
             username = row.Account.Username,
             level = row.Progress != null ? row.Progress.Level : 1,
             gold = row.Progress != null ? row.Progress.Gold : 0,
+            lastSeenAt = row.Presence.LastSeenAt,
             lastSavedAt = row.Progress != null ? row.Progress.LastSavedAt : (DateTime?)null
         })
         .ToListAsync(cancellationToken);
@@ -1216,6 +1286,7 @@ app.MapPost("/trade/offers/send", async (
     }
 
     dbContext.TradeOffers.Add(offer);
+    await MarkHubPresenceAsync(dbContext, request.FromAccountId, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
 
     return Results.Ok(new
@@ -1327,6 +1398,7 @@ app.MapPost("/trade/offers/respond", async (
         offer.RespondedAt = DateTime.UtcNow;
     }
 
+    await MarkHubPresenceAsync(dbContext, request.AccountId, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
 
     return Results.Ok(new
@@ -1388,6 +1460,7 @@ app.MapPost("/trade/offers/cancel", async (
     offer.Status = "cancelled";
     offer.RespondedAt = DateTime.UtcNow;
 
+    await MarkHubPresenceAsync(dbContext, request.AccountId, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
 
     return Results.Ok(new
@@ -1411,6 +1484,7 @@ internal sealed record CompleteQuestRequest(int AccountId, string QuestId);
 internal sealed record AbandonQuestRequest(int AccountId, string QuestId);
 internal sealed record UseInventoryItemRequest(int AccountId, string SessionId, string ItemCode);
 internal sealed record SendHubChatMessageRequest(int AccountId, string Message);
+internal sealed record PingHubPresenceRequest(int AccountId);
 internal sealed record SendTradeOfferRequest(int FromAccountId, string ToUsername, string ItemCode, int Quantity, string? Note);
 internal sealed record RespondTradeOfferRequest(int AccountId, long TradeOfferId, string Action);
 internal sealed record CancelTradeOfferRequest(int AccountId, long TradeOfferId);

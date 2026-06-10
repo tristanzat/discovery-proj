@@ -60,4 +60,9 @@ public class Account
     /// Navigation property: trade offers received by this player.
     /// </summary>
     public ICollection<TradeOffer> ReceivedTradeOffers { get; set; } = [];
+
+    /// <summary>
+    /// Navigation property: last known hub presence for this player.
+    /// </summary>
+    public HubPresence? HubPresence { get; set; }
 }
