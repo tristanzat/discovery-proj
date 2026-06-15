@@ -25,6 +25,10 @@ type DungeonSession = {
   sessionId: string
   accountId: number
   username: string
+  floor: number
+  roomNumber: number
+  totalRooms: number
+  roomsCleared: number
   player: Combatant
   enemy: Combatant
   turn: number
@@ -161,6 +165,13 @@ type CombatAttackResponse = {
   questProgress?: CombatQuestProgressUpdate[]
 }
 
+type AdvanceDungeonRoomResponse = {
+  message: string
+  sessionId: string
+  status: string
+  isCompleted: boolean
+}
+
 type CompleteQuestResponse = {
   message: string
   rewards: {
@@ -260,7 +271,7 @@ function App() {
   const [tradeQuantity, setTradeQuantity] = useState(1)
   const [tradeNote, setTradeNote] = useState('')
   const [activity, setActivity] = useState<string[]>([
-    'Welcome to Phase 3. Log in, enter the hub, and chat before diving into combat.',
+    'Welcome to Phase 4. Clear a procedurally generated floor room by room.',
   ])
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -564,7 +575,7 @@ function App() {
       // Re-read the session after mutations so the UI always uses the canonical shape.
       const latestSession = await loadSession(createdSession.sessionId)
       pushActivity(
-        `Entered the dungeon. ${latestSession.enemy.name} is waiting on turn ${latestSession.turn}.`,
+        `Entered floor ${latestSession.floor}, room ${latestSession.roomNumber}/${latestSession.totalRooms}. ${latestSession.enemy.name} awaits.`,
       )
     })
   }
@@ -583,7 +594,7 @@ function App() {
       const latestSession = await loadSession(result.sessionId)
       await Promise.all([loadAvailableQuests(account.accountId), loadQuestLog(account.accountId)])
       pushActivity(
-        `Attack resolved: ${result.outcome}. ${latestSession.enemy.name} is at ${latestSession.enemy.hp}/${latestSession.enemy.maxHp} HP.`,
+        `Attack resolved: ${result.outcome}. ${latestSession.enemy.name} is at ${latestSession.enemy.hp}/${latestSession.enemy.maxHp} HP in room ${latestSession.roomNumber}/${latestSession.totalRooms}.`,
       )
 
       if (result.questProgress && result.questProgress.length > 0) {
@@ -593,6 +604,30 @@ function App() {
           )
         }
       }
+    })
+  }
+
+  async function handleAdvanceRoom() {
+    if (!session) {
+      return
+    }
+
+    await withSubmission(async () => {
+      const result = await requestJson<AdvanceDungeonRoomResponse>('/api/dungeon/advance', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: session.sessionId }),
+      })
+
+      const latestSession = await loadSession(result.sessionId)
+
+      if (latestSession.isCompleted && latestSession.status === 'victory') {
+        pushActivity(`Floor ${latestSession.floor} cleared. Dungeon run complete.`)
+        return
+      }
+
+      pushActivity(
+        `Advanced to room ${latestSession.roomNumber}/${latestSession.totalRooms}. ${latestSession.enemy.name} appears.`,
+      )
     })
   }
 
@@ -766,7 +801,7 @@ function App() {
     <main className="app-shell">
       <section className="hero-panel panel">
         <div className="eyebrow-row">
-          <span className="eyebrow">Phase 3 foundation</span>
+          <span className="eyebrow">Phase 4 procedural generation</span>
           <span className={`status-pill status-${apiStatus}`}>Backend {apiStatus}</span>
         </div>
 
@@ -774,8 +809,8 @@ function App() {
           <div>
             <h1>Dungeon crawler control room</h1>
             <p>
-              Phase 3 starts here: gather in the hub overworld, chat with other adventurers, then
-              run quests, combat, and inventory actions.
+              Phase 4 expands combat into a procedural floor. Gather in the hub, then clear each
+              generated room to finish your run.
             </p>
           </div>
 
@@ -861,7 +896,7 @@ function App() {
             onClick={() => void handleRefreshProgress()}
             disabled={!hasAccount || isSubmitting || apiStatus !== 'online'}
           >
-            Refresh phase 2 data
+            Refresh world data
           </button>
         </div>
 
@@ -869,7 +904,7 @@ function App() {
           <div>
             <h2>Combat and consumables</h2>
             <p>
-              Enter the room, attack to progress kill quests, and use minor healing potions when
+              Enter a generated floor, clear each room in sequence, and use combat consumables when
               your HP drops.
             </p>
           </div>
@@ -987,9 +1022,35 @@ function App() {
             >
               Retreat
             </button>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => void handleAdvanceRoom()}
+              disabled={
+                !session ||
+                session.isCompleted ||
+                session.status !== 'room-cleared' ||
+                isSubmitting ||
+                apiStatus !== 'online'
+              }
+            >
+              Advance room
+            </button>
           </div>
 
           <dl className="session-meta">
+            <div>
+              <dt>Floor</dt>
+              <dd>{session ? `${session.floor}` : '-'}</dd>
+            </div>
+            <div>
+              <dt>Room</dt>
+              <dd>{session ? `${session.roomNumber}/${session.totalRooms}` : '-'}</dd>
+            </div>
+            <div>
+              <dt>Rooms cleared</dt>
+              <dd>{session?.roomsCleared ?? '-'}</dd>
+            </div>
             <div>
               <dt>Session id</dt>
               <dd>{session?.sessionId ?? 'No active session'}</dd>

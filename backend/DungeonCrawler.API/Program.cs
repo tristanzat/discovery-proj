@@ -18,6 +18,7 @@ var connectionString = builder.Configuration.GetConnectionString("DungeonCrawler
 builder.Services.AddDbContext<DungeonCrawlerDbContext>(options =>
     options.UseNpgsql(connectionString));
 builder.Services.AddSingleton<IDungeonSessionStore, InMemoryDungeonSessionStore>();
+builder.Services.AddSingleton<IProceduralDungeonGenerator, ProceduralDungeonGenerator>();
 builder.Services.AddSingleton<IQuestRewardService, QuestRewardService>();
 builder.Services.AddSingleton<ILevelUpService, LevelUpService>();
 builder.Services.AddSingleton<IInventoryItemEffectService, InventoryItemEffectService>();
@@ -666,6 +667,11 @@ app.MapPost("/inventory/use-combat", async (
         return Results.BadRequest(new { error = "Combat is already completed for this session." });
     }
 
+    if (!string.Equals(session.Status, "in-progress", StringComparison.Ordinal))
+    {
+        return Results.BadRequest(new { error = "Combat consumables can only be used during an active room fight." });
+    }
+
     var inventoryItem = await dbContext.InventoryItems
         .FirstOrDefaultAsync(
             ii => ii.AccountId == request.AccountId && ii.ItemCode == itemCode,
@@ -717,6 +723,7 @@ app.MapPost("/inventory/use-combat", async (
 app.MapPost("/dungeon/enter", async (
     EnterDungeonRequest request,
     DungeonCrawlerDbContext dbContext,
+    IProceduralDungeonGenerator dungeonGenerator,
     IDungeonSessionStore sessionStore,
     CancellationToken cancellationToken) =>
 {
@@ -733,6 +740,9 @@ app.MapPost("/dungeon/enter", async (
         .AsNoTracking()
         .FirstOrDefaultAsync(pp => pp.AccountId == request.AccountId, cancellationToken);
 
+    var playerLevel = progress?.Level ?? 1;
+    var floorLayout = dungeonGenerator.GenerateFloor(playerLevel, request.Seed);
+    var firstRoom = floorLayout.Rooms[0];
     var playerMaxHp = progress?.MaxHp ?? 100;
     var session = new DungeonRoomSession
     {
@@ -741,9 +751,15 @@ app.MapPost("/dungeon/enter", async (
         Username = account.Username,
         PlayerHp = playerMaxHp,
         PlayerMaxHp = playerMaxHp,
-        EnemyHp = 35,
-        EnemyMaxHp = 35,
-        EnemyName = "Cave Goblin",
+        EnemyHp = firstRoom.EnemyMaxHp,
+        EnemyMaxHp = firstRoom.EnemyMaxHp,
+        EnemyName = firstRoom.EnemyName,
+        EnemyTypeTag = firstRoom.EnemyTypeTag,
+        FloorNumber = floorLayout.FloorNumber,
+        CurrentRoomIndex = 0,
+        TotalRooms = floorLayout.Rooms.Count,
+        RoomsCleared = 0,
+        Rooms = floorLayout.Rooms.ToList(),
         IsCompleted = false,
         Status = "in-progress",
         TurnNumber = 1
@@ -753,8 +769,13 @@ app.MapPost("/dungeon/enter", async (
 
     return Results.Ok(new
     {
-        message = "entered-dungeon-room",
+        message = "entered-procedural-floor",
         sessionId = session.SessionId,
+        seed = floorLayout.Seed,
+        floor = session.FloorNumber,
+        roomNumber = session.CurrentRoomIndex + 1,
+        totalRooms = session.TotalRooms,
+        roomsCleared = session.RoomsCleared,
         player = new { hp = session.PlayerHp, maxHp = session.PlayerMaxHp },
         enemy = new { name = session.EnemyName, hp = session.EnemyHp, maxHp = session.EnemyMaxHp },
         turn = session.TurnNumber,
@@ -777,6 +798,10 @@ app.MapGet("/dungeon/session/{sessionId}", (
         sessionId = session.SessionId,
         accountId = session.AccountId,
         username = session.Username,
+        floor = session.FloorNumber,
+        roomNumber = session.CurrentRoomIndex + 1,
+        totalRooms = session.TotalRooms,
+        roomsCleared = session.RoomsCleared,
         player = new { hp = session.PlayerHp, maxHp = session.PlayerMaxHp },
         enemy = new { name = session.EnemyName, hp = session.EnemyHp, maxHp = session.EnemyMaxHp },
         turn = session.TurnNumber,
@@ -785,6 +810,74 @@ app.MapGet("/dungeon/session/{sessionId}", (
     });
 })
 .WithName("GetDungeonSession");
+
+app.MapPost("/dungeon/advance", (
+    AdvanceDungeonRoomRequest request,
+    IDungeonSessionStore sessionStore) =>
+{
+    if (!sessionStore.TryGet(request.SessionId, out var session) || session is null)
+    {
+        return Results.NotFound(new { error = "Session not found." });
+    }
+
+    if (session.IsCompleted)
+    {
+        return Results.BadRequest(new { error = "Dungeon run is already completed." });
+    }
+
+    if (!string.Equals(session.Status, "room-cleared", StringComparison.Ordinal))
+    {
+        return Results.BadRequest(new { error = "Current room is not cleared yet." });
+    }
+
+    var nextRoomIndex = session.CurrentRoomIndex + 1;
+    if (nextRoomIndex >= session.TotalRooms)
+    {
+        session.IsCompleted = true;
+        session.Status = "victory";
+        sessionStore.CreateOrReplace(session);
+
+        return Results.Ok(new
+        {
+            message = "floor-cleared",
+            sessionId = session.SessionId,
+            floor = session.FloorNumber,
+            roomNumber = session.CurrentRoomIndex + 1,
+            totalRooms = session.TotalRooms,
+            roomsCleared = session.RoomsCleared,
+            status = session.Status,
+            isCompleted = session.IsCompleted
+        });
+    }
+
+    var nextRoom = session.Rooms[nextRoomIndex];
+
+    session.CurrentRoomIndex = nextRoomIndex;
+    session.EnemyName = nextRoom.EnemyName;
+    session.EnemyTypeTag = nextRoom.EnemyTypeTag;
+    session.EnemyMaxHp = nextRoom.EnemyMaxHp;
+    session.EnemyHp = nextRoom.EnemyMaxHp;
+    session.Status = "in-progress";
+    session.TurnNumber += 1;
+
+    sessionStore.CreateOrReplace(session);
+
+    return Results.Ok(new
+    {
+        message = "advanced-to-next-room",
+        sessionId = session.SessionId,
+        floor = session.FloorNumber,
+        roomNumber = session.CurrentRoomIndex + 1,
+        totalRooms = session.TotalRooms,
+        roomsCleared = session.RoomsCleared,
+        player = new { hp = session.PlayerHp, maxHp = session.PlayerMaxHp },
+        enemy = new { name = session.EnemyName, hp = session.EnemyHp, maxHp = session.EnemyMaxHp },
+        turn = session.TurnNumber,
+        status = session.Status,
+        isCompleted = session.IsCompleted
+    });
+})
+.WithName("AdvanceDungeonRoom");
 
 app.MapPost("/combat/attack", async (
     CombatActionRequest request,
@@ -802,6 +895,11 @@ app.MapPost("/combat/attack", async (
         return Results.BadRequest(new { error = "Combat is already completed for this session." });
     }
 
+    if (string.Equals(session.Status, "room-cleared", StringComparison.Ordinal))
+    {
+        return Results.BadRequest(new { error = "Current room already cleared. Advance to the next room." });
+    }
+
     // Deterministic values keep the MVP predictable while learning endpoint flow.
     const int playerDamage = 12;
     const int enemyDamage = 6;
@@ -814,8 +912,6 @@ app.MapPost("/combat/attack", async (
 
     if (session.EnemyHp == 0)
     {
-        session.IsCompleted = true;
-        session.Status = "victory";
         outcome = "enemy-defeated";
 
         // Advance kill count on every accepted quest whose enemy type tag matches the defeated enemy.
@@ -829,6 +925,7 @@ app.MapPost("/combat/attack", async (
             var tag = pq.QuestDefinition?.EnemyTypeTag;
             // Null tag means any enemy satisfies the quest; otherwise require a name match.
             var matches = tag is null
+                || session.EnemyTypeTag.Contains(tag, StringComparison.OrdinalIgnoreCase)
                 || session.EnemyName.Contains(tag, StringComparison.OrdinalIgnoreCase);
 
             if (!matches) continue;
@@ -852,6 +949,17 @@ app.MapPost("/combat/attack", async (
         if (acceptedQuests.Count > 0)
         {
             await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        session.RoomsCleared += 1;
+        if (session.RoomsCleared >= session.TotalRooms)
+        {
+            session.IsCompleted = true;
+            session.Status = "victory";
+        }
+        else
+        {
+            session.Status = "room-cleared";
         }
     }
     else
@@ -1477,8 +1585,9 @@ app.Run();
 
 internal sealed record RegisterRequest(string Username, string Password);
 internal sealed record LoginRequest(string Username, string Password);
-internal sealed record EnterDungeonRequest(int AccountId);
+internal sealed record EnterDungeonRequest(int AccountId, int? Seed = null);
 internal sealed record CombatActionRequest(string SessionId);
+internal sealed record AdvanceDungeonRoomRequest(string SessionId);
 internal sealed record AcceptQuestRequest(int AccountId, string QuestId);
 internal sealed record CompleteQuestRequest(int AccountId, string QuestId);
 internal sealed record AbandonQuestRequest(int AccountId, string QuestId);

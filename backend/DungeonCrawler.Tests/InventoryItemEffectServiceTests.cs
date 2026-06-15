@@ -71,6 +71,17 @@ public class InventoryItemEffectServiceTests
             EnemyHp = 35,
             EnemyMaxHp = 35,
             EnemyName = "Cave Goblin",
+            EnemyTypeTag = "Goblin",
+            FloorNumber = 1,
+            CurrentRoomIndex = 0,
+            TotalRooms = 3,
+            RoomsCleared = 0,
+            Rooms =
+            [
+                new DungeonGeneratedRoom("Cave Goblin", "Goblin", 35),
+                new DungeonGeneratedRoom("Stone Kobold", "Kobold", 40),
+                new DungeonGeneratedRoom("Ash Skeleton", "Skeleton", 45)
+            ],
             IsCompleted = false,
             Status = "in-progress",
             TurnNumber = 1
