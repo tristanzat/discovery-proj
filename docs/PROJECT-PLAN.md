@@ -1,6 +1,7 @@
 # Discovery Project Plan
 ## Current Status
 - As of 2026-06-15: Phase 1 complete, Phase 2 complete, Phase 3 complete, Phase 4 complete.
+- As of 2026-06-29: Phase 5 complete. Realtime SignalR sync, containerization, and Kubernetes scaling assets are now in place.
 
 ## Description
 This project will be an online multiplayer dungeon crawler. Players will have accounts that they have to log in with in order to play. There will be quests, trading, looting, and other basic functions of a dungeon crawler. There will be a main hub overworld where quests are accepted and players interact with each other. There will also be a portal to go to a procedurally-generated dungeon. Enemies are computer-controlled; the game is PvE.

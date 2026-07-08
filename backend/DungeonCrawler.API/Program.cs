@@ -1,6 +1,8 @@
 using DungeonCrawler.API.Data;
+using DungeonCrawler.API.Hubs;
 using DungeonCrawler.API.Models;
 using DungeonCrawler.API.Services;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -17,6 +19,7 @@ var connectionString = builder.Configuration.GetConnectionString("DungeonCrawler
 
 builder.Services.AddDbContext<DungeonCrawlerDbContext>(options =>
     options.UseNpgsql(connectionString));
+builder.Services.AddSignalR();
 builder.Services.AddSingleton<IDungeonSessionStore, InMemoryDungeonSessionStore>();
 builder.Services.AddSingleton<IProceduralDungeonGenerator, ProceduralDungeonGenerator>();
 builder.Services.AddSingleton<IQuestRewardService, QuestRewardService>();
@@ -44,6 +47,86 @@ static async Task MarkHubPresenceAsync(
     }
 
     existing.LastSeenAt = DateTime.UtcNow;
+}
+
+static Task NotifyHubPresenceChangedAsync(
+    IHubContext<GameHub> hubContext,
+    CancellationToken cancellationToken)
+{
+    return hubContext.Clients
+        .Group(GameHub.HubGroupName)
+        .SendAsync("hubPresenceChanged", new { changedAt = DateTime.UtcNow }, cancellationToken);
+}
+
+static Task NotifyHubChatMessageReceivedAsync(
+    IHubContext<GameHub> hubContext,
+    object chatMessage,
+    CancellationToken cancellationToken)
+{
+    return hubContext.Clients
+        .Group(GameHub.HubGroupName)
+        .SendAsync("hubChatMessageReceived", chatMessage, cancellationToken);
+}
+
+static Task NotifyTradeOffersChangedAsync(
+    IHubContext<GameHub> hubContext,
+    int accountId,
+    CancellationToken cancellationToken)
+{
+    return hubContext.Clients
+        .Group(GameHub.AccountGroup(accountId))
+        .SendAsync("tradeOffersChanged", new { accountId, changedAt = DateTime.UtcNow }, cancellationToken);
+}
+
+static Task NotifyInventoryChangedAsync(
+    IHubContext<GameHub> hubContext,
+    int accountId,
+    CancellationToken cancellationToken)
+{
+    return hubContext.Clients
+        .Group(GameHub.AccountGroup(accountId))
+        .SendAsync("inventoryChanged", new { accountId, changedAt = DateTime.UtcNow }, cancellationToken);
+}
+
+static Task NotifyQuestsChangedAsync(
+    IHubContext<GameHub> hubContext,
+    int accountId,
+    CancellationToken cancellationToken)
+{
+    return hubContext.Clients
+        .Group(GameHub.AccountGroup(accountId))
+        .SendAsync("questsChanged", new { accountId, changedAt = DateTime.UtcNow }, cancellationToken);
+}
+
+static Task NotifyProgressChangedAsync(
+    IHubContext<GameHub> hubContext,
+    int accountId,
+    CancellationToken cancellationToken)
+{
+    return hubContext.Clients
+        .Group(GameHub.AccountGroup(accountId))
+        .SendAsync("progressChanged", new { accountId, changedAt = DateTime.UtcNow }, cancellationToken);
+}
+
+static Task NotifyDungeonSessionChangedAsync(
+    IHubContext<GameHub> hubContext,
+    DungeonRoomSession session,
+    CancellationToken cancellationToken)
+{
+    var payload = new
+    {
+        accountId = session.AccountId,
+        sessionId = session.SessionId,
+        status = session.Status,
+        isCompleted = session.IsCompleted,
+        changedAt = DateTime.UtcNow
+    };
+
+    return Task.WhenAll(
+        hubContext.Clients.Group(GameHub.AccountGroup(session.AccountId))
+            .SendAsync("dungeonSessionChanged", payload, cancellationToken),
+        hubContext.Clients.Group(GameHub.SessionGroup(session.SessionId))
+            .SendAsync("dungeonSessionChanged", payload, cancellationToken));
 }
 
 var starterQuestDefinitions = new[]
@@ -181,6 +264,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.MapHub<GameHub>("/game");
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }))
     .WithName("HealthCheck");
@@ -193,6 +277,7 @@ app.MapGet("/db-check", (DungeonCrawlerDbContext dbContext) =>
 app.MapPost("/auth/register", async (
     RegisterRequest request,
     DungeonCrawlerDbContext dbContext,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
@@ -255,6 +340,7 @@ app.MapPost("/auth/register", async (
     await MarkHubPresenceAsync(dbContext, account.AccountId, cancellationToken);
 
     await dbContext.SaveChangesAsync(cancellationToken);
+    await NotifyHubPresenceChangedAsync(hubContext, cancellationToken);
 
     return Results.Created($"/accounts/{account.AccountId}", new
     {
@@ -268,6 +354,7 @@ app.MapPost("/auth/register", async (
 app.MapPost("/auth/login", async (
     LoginRequest request,
     DungeonCrawlerDbContext dbContext,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
@@ -291,6 +378,7 @@ app.MapPost("/auth/login", async (
 
     await MarkHubPresenceAsync(dbContext, account.AccountId, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await NotifyHubPresenceChangedAsync(hubContext, cancellationToken);
 
     // NOTE: Stage 3 returns basic login payload only.
     // JWT/session token issuing is a later step.
@@ -360,6 +448,7 @@ app.MapGet("/quests/available/{accountId:int}", async (
 app.MapPost("/quests/accept", async (
     AcceptQuestRequest request,
     DungeonCrawlerDbContext dbContext,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     var accountExists = await dbContext.Accounts
@@ -401,6 +490,7 @@ app.MapPost("/quests/accept", async (
     });
 
     await dbContext.SaveChangesAsync(cancellationToken);
+    await NotifyQuestsChangedAsync(hubContext, request.AccountId, cancellationToken);
 
     return Results.Ok(new
     {
@@ -417,6 +507,7 @@ app.MapPost("/quests/complete", async (
     DungeonCrawlerDbContext dbContext,
     IQuestRewardService questRewardService,
     ILevelUpService levelUpService,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     var playerQuest = await dbContext.PlayerQuests
@@ -496,6 +587,10 @@ app.MapPost("/quests/complete", async (
     }
 
     await dbContext.SaveChangesAsync(cancellationToken);
+    await Task.WhenAll(
+        NotifyQuestsChangedAsync(hubContext, request.AccountId, cancellationToken),
+        NotifyInventoryChangedAsync(hubContext, request.AccountId, cancellationToken),
+        NotifyProgressChangedAsync(hubContext, request.AccountId, cancellationToken));
 
     return Results.Ok(new
     {
@@ -572,6 +667,7 @@ app.MapGet("/quests/log/{accountId:int}", async (
 app.MapPost("/quests/abandon", async (
     AbandonQuestRequest request,
     DungeonCrawlerDbContext dbContext,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     var playerQuest = await dbContext.PlayerQuests
@@ -591,6 +687,7 @@ app.MapPost("/quests/abandon", async (
 
     dbContext.PlayerQuests.Remove(playerQuest);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await NotifyQuestsChangedAsync(hubContext, request.AccountId, cancellationToken);
 
     return Results.Ok(new
     {
@@ -643,6 +740,7 @@ app.MapPost("/inventory/use-combat", async (
     DungeonCrawlerDbContext dbContext,
     IDungeonSessionStore sessionStore,
     IInventoryItemEffectService itemEffectService,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.ItemCode))
@@ -700,6 +798,9 @@ app.MapPost("/inventory/use-combat", async (
 
     sessionStore.CreateOrReplace(session);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await Task.WhenAll(
+        NotifyInventoryChangedAsync(hubContext, request.AccountId, cancellationToken),
+        NotifyDungeonSessionChangedAsync(hubContext, session, cancellationToken));
 
     return Results.Ok(new
     {
@@ -725,6 +826,7 @@ app.MapPost("/dungeon/enter", async (
     DungeonCrawlerDbContext dbContext,
     IProceduralDungeonGenerator dungeonGenerator,
     IDungeonSessionStore sessionStore,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     var account = await dbContext.Accounts
@@ -766,6 +868,7 @@ app.MapPost("/dungeon/enter", async (
     };
 
     sessionStore.CreateOrReplace(session);
+    await NotifyDungeonSessionChangedAsync(hubContext, session, cancellationToken);
 
     return Results.Ok(new
     {
@@ -811,9 +914,11 @@ app.MapGet("/dungeon/session/{sessionId}", (
 })
 .WithName("GetDungeonSession");
 
-app.MapPost("/dungeon/advance", (
+app.MapPost("/dungeon/advance", async (
     AdvanceDungeonRoomRequest request,
-    IDungeonSessionStore sessionStore) =>
+    IDungeonSessionStore sessionStore,
+    IHubContext<GameHub> hubContext,
+    CancellationToken cancellationToken) =>
 {
     if (!sessionStore.TryGet(request.SessionId, out var session) || session is null)
     {
@@ -836,6 +941,7 @@ app.MapPost("/dungeon/advance", (
         session.IsCompleted = true;
         session.Status = "victory";
         sessionStore.CreateOrReplace(session);
+        await NotifyDungeonSessionChangedAsync(hubContext, session, cancellationToken);
 
         return Results.Ok(new
         {
@@ -861,6 +967,7 @@ app.MapPost("/dungeon/advance", (
     session.TurnNumber += 1;
 
     sessionStore.CreateOrReplace(session);
+    await NotifyDungeonSessionChangedAsync(hubContext, session, cancellationToken);
 
     return Results.Ok(new
     {
@@ -883,6 +990,7 @@ app.MapPost("/combat/attack", async (
     CombatActionRequest request,
     IDungeonSessionStore sessionStore,
     DungeonCrawlerDbContext dbContext,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     if (!sessionStore.TryGet(request.SessionId, out var session) || session is null)
@@ -978,6 +1086,17 @@ app.MapPost("/combat/attack", async (
     }
 
     sessionStore.CreateOrReplace(session);
+    var notifications = new List<Task>
+    {
+        NotifyDungeonSessionChangedAsync(hubContext, session, cancellationToken)
+    };
+
+    if (questProgressUpdates.Count > 0)
+    {
+        notifications.Add(NotifyQuestsChangedAsync(hubContext, session.AccountId, cancellationToken));
+    }
+
+    await Task.WhenAll(notifications);
 
     return Results.Ok(new
     {
@@ -993,9 +1112,11 @@ app.MapPost("/combat/attack", async (
 })
 .WithName("CombatAttack");
 
-app.MapPost("/combat/retreat", (
+app.MapPost("/combat/retreat", async (
     CombatActionRequest request,
-    IDungeonSessionStore sessionStore) =>
+    IDungeonSessionStore sessionStore,
+    IHubContext<GameHub> hubContext,
+    CancellationToken cancellationToken) =>
 {
     if (!sessionStore.TryGet(request.SessionId, out var session) || session is null)
     {
@@ -1005,6 +1126,7 @@ app.MapPost("/combat/retreat", (
     session.IsCompleted = true;
     session.Status = "retreated";
     sessionStore.CreateOrReplace(session);
+    await NotifyDungeonSessionChangedAsync(hubContext, session, cancellationToken);
 
     return Results.Ok(new
     {
@@ -1142,6 +1264,7 @@ app.MapGet("/hub/chat/{accountId:int}", async (
 app.MapPost("/hub/chat/send", async (
     SendHubChatMessageRequest request,
     DungeonCrawlerDbContext dbContext,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     var account = await dbContext.Accounts
@@ -1175,17 +1298,23 @@ app.MapPost("/hub/chat/send", async (
     await MarkHubPresenceAsync(dbContext, request.AccountId, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
 
+    var chatPayload = new
+    {
+        messageId = chatMessage.HubChatMessageId,
+        accountId = chatMessage.AccountId,
+        username = account.Username,
+        message = chatMessage.Message,
+        sentAt = chatMessage.SentAt
+    };
+
+    await Task.WhenAll(
+        NotifyHubChatMessageReceivedAsync(hubContext, chatPayload, cancellationToken),
+        NotifyHubPresenceChangedAsync(hubContext, cancellationToken));
+
     return Results.Ok(new
     {
         message = "hub-chat-sent",
-        chat = new
-        {
-            messageId = chatMessage.HubChatMessageId,
-            accountId = chatMessage.AccountId,
-            username = account.Username,
-            message = chatMessage.Message,
-            sentAt = chatMessage.SentAt
-        }
+        chat = chatPayload
     });
 })
 .WithName("SendHubChatMessage");
@@ -1193,6 +1322,7 @@ app.MapPost("/hub/chat/send", async (
 app.MapPost("/hub/presence/ping", async (
     PingHubPresenceRequest request,
     DungeonCrawlerDbContext dbContext,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     var accountExists = await dbContext.Accounts
@@ -1206,6 +1336,7 @@ app.MapPost("/hub/presence/ping", async (
 
     await MarkHubPresenceAsync(dbContext, request.AccountId, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await NotifyHubPresenceChangedAsync(hubContext, cancellationToken);
 
     return Results.Ok(new
     {
@@ -1318,6 +1449,7 @@ app.MapGet("/trade/offers/{accountId:int}", async (
 app.MapPost("/trade/offers/send", async (
     SendTradeOfferRequest request,
     DungeonCrawlerDbContext dbContext,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     if (request.Quantity <= 0)
@@ -1396,6 +1528,11 @@ app.MapPost("/trade/offers/send", async (
     dbContext.TradeOffers.Add(offer);
     await MarkHubPresenceAsync(dbContext, request.FromAccountId, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await Task.WhenAll(
+        NotifyTradeOffersChangedAsync(hubContext, request.FromAccountId, cancellationToken),
+        NotifyTradeOffersChangedAsync(hubContext, toAccount.AccountId, cancellationToken),
+        NotifyInventoryChangedAsync(hubContext, request.FromAccountId, cancellationToken),
+        NotifyHubPresenceChangedAsync(hubContext, cancellationToken));
 
     return Results.Ok(new
     {
@@ -1418,6 +1555,7 @@ app.MapPost("/trade/offers/send", async (
 app.MapPost("/trade/offers/respond", async (
     RespondTradeOfferRequest request,
     DungeonCrawlerDbContext dbContext,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.Action))
@@ -1508,6 +1646,12 @@ app.MapPost("/trade/offers/respond", async (
 
     await MarkHubPresenceAsync(dbContext, request.AccountId, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await Task.WhenAll(
+        NotifyTradeOffersChangedAsync(hubContext, offer.FromAccountId, cancellationToken),
+        NotifyTradeOffersChangedAsync(hubContext, offer.ToAccountId, cancellationToken),
+        NotifyInventoryChangedAsync(hubContext, offer.FromAccountId, cancellationToken),
+        NotifyInventoryChangedAsync(hubContext, offer.ToAccountId, cancellationToken),
+        NotifyHubPresenceChangedAsync(hubContext, cancellationToken));
 
     return Results.Ok(new
     {
@@ -1522,6 +1666,7 @@ app.MapPost("/trade/offers/respond", async (
 app.MapPost("/trade/offers/cancel", async (
     CancelTradeOfferRequest request,
     DungeonCrawlerDbContext dbContext,
+    IHubContext<GameHub> hubContext,
     CancellationToken cancellationToken) =>
 {
     var offer = await dbContext.TradeOffers
@@ -1570,6 +1715,11 @@ app.MapPost("/trade/offers/cancel", async (
 
     await MarkHubPresenceAsync(dbContext, request.AccountId, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await Task.WhenAll(
+        NotifyTradeOffersChangedAsync(hubContext, offer.FromAccountId, cancellationToken),
+        NotifyTradeOffersChangedAsync(hubContext, offer.ToAccountId, cancellationToken),
+        NotifyInventoryChangedAsync(hubContext, offer.FromAccountId, cancellationToken),
+        NotifyHubPresenceChangedAsync(hubContext, cancellationToken));
 
     return Results.Ok(new
     {

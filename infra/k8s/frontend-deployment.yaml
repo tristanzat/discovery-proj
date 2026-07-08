@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dungeon-crawler-frontend
+  namespace: dungeon-crawler
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dungeon-crawler-frontend
+  template:
+    metadata:
+      labels:
+        app: dungeon-crawler-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/your-org/dungeon-crawler-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

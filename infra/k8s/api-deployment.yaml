@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dungeon-crawler-api
+  namespace: dungeon-crawler
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dungeon-crawler-api
+  template:
+    metadata:
+      labels:
+        app: dungeon-crawler-api
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/your-org/dungeon-crawler-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: dungeon-crawler-api-config
+            - secretRef:
+                name: dungeon-crawler-api-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi

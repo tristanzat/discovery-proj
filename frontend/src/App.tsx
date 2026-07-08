@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import type { HubConnection } from '@microsoft/signalr'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
+import { createGameConnection, isConnectionReady } from './realtime/gameRealtime'
 
 type ApiStatus = 'checking' | 'online' | 'offline'
+type RealtimeStatus = 'disconnected' | 'connecting' | 'connected'
 
 type AuthForm = {
   username: string
@@ -194,6 +197,19 @@ type CompleteQuestResponse = {
   }
 }
 
+type AccountChangeEvent = {
+  accountId: number
+  changedAt: string
+}
+
+type DungeonSessionChangeEvent = {
+  accountId: number
+  sessionId: string
+  status: string
+  isCompleted: boolean
+  changedAt: string
+}
+
 type ApiError = {
   error?: string
   title?: string
@@ -253,6 +269,7 @@ function isCombatConsumable(itemCode: string) {
 
 function App() {
   const [apiStatus, setApiStatus] = useState<ApiStatus>('checking')
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>('disconnected')
   const [registerForm, setRegisterForm] = useState<AuthForm>({ username: '', password: '' })
   const [loginForm, setLoginForm] = useState<AuthForm>({ username: '', password: '' })
   const [account, setAccount] = useState<AccountSummary | null>(null)
@@ -271,10 +288,16 @@ function App() {
   const [tradeQuantity, setTradeQuantity] = useState(1)
   const [tradeNote, setTradeNote] = useState('')
   const [activity, setActivity] = useState<string[]>([
-    'Welcome to Phase 4. Clear a procedurally generated floor room by room.',
+    'Welcome to this multiplayer dungeon crawler.',
   ])
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const accountRef = useRef<AccountSummary | null>(null)
+  const sessionRef = useRef<DungeonSession | null>(null)
+  const connectionRef = useRef<HubConnection | null>(null)
+  const joinedAccountIdRef = useRef<number | null>(null)
+  const joinedSessionIdRef = useRef<string | null>(null)
+  const joinedHubRef = useRef(false)
 
   useEffect(() => {
     let isMounted = true
@@ -303,12 +326,54 @@ function App() {
     setActivity((current) => [entry, ...current].slice(0, 8))
   }
 
+  function appendHubChatMessage(message: HubChatMessage) {
+    setHubChatMessages((current) => {
+      if (current.some((entry) => entry.messageId === message.messageId)) {
+        return current
+      }
+
+      return [...current, message].slice(-30)
+    })
+  }
+
   function updateRegisterField(field: keyof AuthForm, value: string) {
     setRegisterForm((current) => ({ ...current, [field]: value }))
   }
 
   function updateLoginField(field: keyof AuthForm, value: string) {
     setLoginForm((current) => ({ ...current, [field]: value }))
+  }
+
+  async function synchronizeRealtimeGroups(nextAccountId: number | null, nextSessionId: string | null) {
+    const connection = connectionRef.current
+    if (!connection || !isConnectionReady(connection)) {
+      return
+    }
+
+    if (joinedSessionIdRef.current && joinedSessionIdRef.current !== nextSessionId) {
+      await connection.invoke('LeaveSession', joinedSessionIdRef.current)
+      joinedSessionIdRef.current = null
+    }
+
+    if (joinedAccountIdRef.current && joinedAccountIdRef.current !== nextAccountId) {
+      await connection.invoke('LeaveAccount', joinedAccountIdRef.current)
+      joinedAccountIdRef.current = null
+    }
+
+    if (nextAccountId !== null && !joinedHubRef.current) {
+      await connection.invoke('JoinHub')
+      joinedHubRef.current = true
+    }
+
+    if (nextAccountId !== null && joinedAccountIdRef.current !== nextAccountId) {
+      await connection.invoke('JoinAccount', nextAccountId)
+      joinedAccountIdRef.current = nextAccountId
+    }
+
+    if (nextSessionId && joinedSessionIdRef.current !== nextSessionId) {
+      await connection.invoke('JoinSession', nextSessionId)
+      joinedSessionIdRef.current = nextSessionId
+    }
   }
 
   async function loadSession(sessionId: string) {
@@ -366,6 +431,135 @@ function App() {
     setTradeOffers(response.offers)
     return response.offers
   }
+
+  useEffect(() => {
+    accountRef.current = account
+  }, [account])
+
+  useEffect(() => {
+    sessionRef.current = session
+  }, [session])
+
+  useEffect(() => {
+    if (apiStatus !== 'online') {
+      return
+    }
+
+    const connection = createGameConnection()
+    connectionRef.current = connection
+
+    connection.onreconnecting(() => {
+      setRealtimeStatus('connecting')
+      return Promise.resolve()
+    })
+
+    connection.onreconnected(async () => {
+      setRealtimeStatus('connected')
+      joinedHubRef.current = false
+      joinedAccountIdRef.current = null
+      joinedSessionIdRef.current = null
+      await synchronizeRealtimeGroups(
+        accountRef.current?.accountId ?? null,
+        sessionRef.current?.sessionId ?? null,
+      )
+    })
+
+    connection.onclose(() => {
+      setRealtimeStatus('disconnected')
+    })
+
+    connection.on('hubPresenceChanged', () => {
+      const currentAccount = accountRef.current
+      if (!currentAccount) {
+        return
+      }
+
+      void Promise.all([loadHubOverview(currentAccount.accountId), loadHubRoster(currentAccount.accountId)])
+    })
+
+    connection.on('hubChatMessageReceived', (message: HubChatMessage) => {
+      appendHubChatMessage(message)
+    })
+
+    connection.on('tradeOffersChanged', (payload: AccountChangeEvent) => {
+      const currentAccount = accountRef.current
+      if (!currentAccount || currentAccount.accountId !== payload.accountId) {
+        return
+      }
+
+      void loadTradeOffers(currentAccount.accountId)
+    })
+
+    connection.on('inventoryChanged', (payload: AccountChangeEvent) => {
+      const currentAccount = accountRef.current
+      if (!currentAccount || currentAccount.accountId !== payload.accountId) {
+        return
+      }
+
+      void loadInventory(currentAccount.accountId)
+    })
+
+    connection.on('questsChanged', (payload: AccountChangeEvent) => {
+      const currentAccount = accountRef.current
+      if (!currentAccount || currentAccount.accountId !== payload.accountId) {
+        return
+      }
+
+      void Promise.all([
+        loadAvailableQuests(currentAccount.accountId),
+        loadQuestLog(currentAccount.accountId),
+      ])
+    })
+
+    connection.on('progressChanged', (payload: AccountChangeEvent) => {
+      const currentAccount = accountRef.current
+      if (!currentAccount || currentAccount.accountId !== payload.accountId) {
+        return
+      }
+
+      void loadProgress(currentAccount.accountId)
+    })
+
+    connection.on('dungeonSessionChanged', (payload: DungeonSessionChangeEvent) => {
+      const currentAccount = accountRef.current
+      const currentSession = sessionRef.current
+
+      if (!currentAccount || currentAccount.accountId !== payload.accountId) {
+        return
+      }
+
+      if (!currentSession || currentSession.sessionId !== payload.sessionId) {
+        return
+      }
+
+      void loadSession(payload.sessionId)
+    })
+
+    async function startRealtime() {
+      try {
+        setRealtimeStatus('connecting')
+        await connection.start()
+        setRealtimeStatus('connected')
+        await synchronizeRealtimeGroups(accountRef.current?.accountId ?? null, sessionRef.current?.sessionId ?? null)
+        pushActivity('Realtime channel connected.')
+      } catch (error) {
+        setRealtimeStatus('disconnected')
+        const message = error instanceof Error ? error.message : 'unknown realtime error'
+        pushActivity(`Realtime connection failed: ${message}`)
+      }
+    }
+
+    void startRealtime()
+
+    return () => {
+      connectionRef.current = null
+      joinedHubRef.current = false
+      joinedAccountIdRef.current = null
+      joinedSessionIdRef.current = null
+      setRealtimeStatus('disconnected')
+      void connection.stop()
+    }
+  }, [apiStatus])
 
   async function refreshPhaseTwoState(accountId: number) {
     await pingHubPresence(accountId)
@@ -470,7 +664,6 @@ function App() {
       })
 
       setHubMessageDraft('')
-      await loadHubOverview(account.accountId)
       pushActivity(`Hub chat: ${account.username} says "${message}"`)
     })
   }
@@ -789,28 +982,44 @@ function App() {
 
     const intervalId = setInterval(() => {
       void pingHubPresence(account.accountId)
-      void Promise.all([loadHubOverview(account.accountId), loadHubRoster(account.accountId)])
-    }, 30000)
+    }, 60000)
 
     return () => {
       clearInterval(intervalId)
     }
   }, [account, apiStatus])
 
+  useEffect(() => {
+    if (realtimeStatus !== 'connected') {
+      return
+    }
+
+    void synchronizeRealtimeGroups(account?.accountId ?? null, session?.sessionId ?? null)
+  }, [account?.accountId, session?.sessionId, realtimeStatus])
+
+  const realtimeStatusVariant =
+    realtimeStatus === 'connected'
+      ? 'online'
+      : realtimeStatus === 'connecting'
+        ? 'checking'
+        : 'offline'
+
   return (
     <main className="app-shell">
       <section className="hero-panel panel">
         <div className="eyebrow-row">
-          <span className="eyebrow">Phase 4 procedural generation</span>
+          <span className="eyebrow">Main page working.</span>
           <span className={`status-pill status-${apiStatus}`}>Backend {apiStatus}</span>
+          <span className={`status-pill status-${realtimeStatusVariant}`}>
+            Realtime {realtimeStatus}
+          </span>
         </div>
 
         <div className="hero-copy">
           <div>
-            <h1>Dungeon crawler control room</h1>
+            <h1>Realtime Dungeon Crawler</h1>
             <p>
-              Phase 4 expands combat into a procedural floor. Gather in the hub, then clear each
-              generated room to finish your run.
+              Try the dungeon loop and trade and chat with other players.
             </p>
           </div>
 
