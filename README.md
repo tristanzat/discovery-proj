@@ -4,7 +4,7 @@ Project led by Tristan Zatylny. Developed with the help of AI.
 
 ## Running this
 
-1. Download this repository
+1. Clone this repository
 2. Open two terminals, one in `frontend`, one in `backend\DungeonCrawler.API`
 3. In the frontend terminal, run `npm install`
 4. When that finishes, in the same terminal, run `npm run dev`
